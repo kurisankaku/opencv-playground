@@ -8,15 +8,16 @@
 
 ## 📌 プロジェクトの現状
 
-> **現在は「仕様・データ定義フェーズ」です。** アプリ本体（React コンポーネント等）はこれから実装します。
-> 何を・どの順で作るかは [`docs/spec/`](docs/spec/) の仕様書群と [`src/data/`](src/data/) のデータ定義で確定済みです。
+> **アプリ実装済み（継続開発中）。** Phase 1〜2 を中心に **31 デモがブラウザで実際に動作**します。
+> 残りのデモは仕様（[`docs/spec/`](docs/spec/) / [`src/data/`](src/data/)）として定義済みで、詳細ページから閲覧できます。
 
 | 指標 | 値 |
 | --- | --- |
 | 機能カテゴリ | 20 |
-| デモ候補 | 91（うち MVP 対象 44） |
+| デモ定義 | 91（うち MVP 対象 44） |
+| 体験できるデモ | 31（インタラクティブ実装済み） |
 | 対象 | OpenCV 4.x / OpenCV.js（WASM） |
-| 想定スタック | React + TypeScript + Vite（静的ホスティング） |
+| スタック | React · TypeScript · Vite · Tailwind CSS v4 · Framer Motion · OpenCV.js |
 
 ---
 
@@ -37,13 +38,25 @@ opencv-playground/
 │       ├── ui-requirements.md               # UI要件
 │       ├── non-functional-requirements.md   # 非機能要件
 │       └── research-notes.md                # OpenCV.js調査メモ
+├── index.html · vite.config.ts · tsconfig.json
 └── src/
-    └── data/                  # アプリで使うデータ定義（機械可読の正典）
-        ├── opencvCategories.ts             # 20カテゴリ
-        └── opencvDemos.ts                  # 91デモ
+    ├── main.tsx · App.tsx              # エントリ / ルーティング (HashRouter)
+    ├── index.css                       # Tailwind v4 + デザイントークン (Vision Lab)
+    ├── data/                           # 機械可読の正典
+    │   ├── opencvCategories.ts         # 20カテゴリ
+    │   └── opencvDemos.ts              # 91デモ
+    ├── lib/                            # 処理エンジン
+    │   ├── loadOpenCV.ts               # OpenCV.js 遅延ローダ
+    │   ├── cvUtils.ts                  # Mat メモリ管理 (Scope) / 画像変換
+    │   ├── processors.ts               # 31デモの実処理レジストリ
+    │   └── sampleImages.ts             # 手続き生成サンプル画像
+    ├── context/OpenCvContext.tsx       # ランタイム状態
+    ├── components/                     # CompareView / ParamPanel / DemoRunner ほか
+    └── pages/                          # Home / DemoList / DemoDetail
 ```
 
 `opencvDemos.ts` が機械可読の正典、`docs/spec/opencv-feature-catalog.md` がその人間可読版です。両者の ID は一致しています。
+処理関数を持つデモは `src/lib/processors.ts` に登録され、詳細ページでインタラクティブに動作します（未登録のデモは仕様として閲覧可能）。
 
 ---
 
@@ -54,43 +67,28 @@ opencv-playground/
 - **Node.js 18 以上**（推奨 20+。動作確認は v24）
 - npm（または pnpm / yarn）
 
-### 1. データ定義の検証（いますぐ実行可能）
-
-アプリを未スキャフォールドの現段階でも、データ定義（`src/data/*.ts`）の**構文・import 解決**は検証できます。インストール不要です。
+### 1. セットアップ & 開発
 
 ```bash
-# 構文チェック + import 解決の検証（esbuild で一括バンドル）
-npx --yes esbuild src/data/opencvCategories.ts src/data/opencvDemos.ts \
-  --bundle --format=esm --outdir=/tmp/ocv-check
-# エラーが出力されなければ OK
-```
-
-### 2. アプリのセットアップ（実装フェーズで実施）
-
-アプリ本体はまだスキャフォールドされていません。実装着手時は Vite + React + TypeScript で初期化します。
-
-```bash
-# 例: 既存ディレクトリに Vite(React+TS) を導入
-npm create vite@latest . -- --template react-ts
 npm install
-
-# OpenCV.js を利用（CDN 読み込み、または npm パッケージ/自前ホスト）
-# 詳細な読み込み方針は docs/spec/non-functional-requirements.md を参照
+npm run dev       # 開発サーバ（http://localhost:5173）
 ```
 
-### 3. 開発・ビルド・プレビュー（Vite 導入後に有効）
+ブラウザで開くと、初回に OpenCV.js（WebAssembly, 約 8–10MB）を CDN（`docs.opencv.org/4.x/opencv.js`）から遅延ロードします。ヘッダーの「OpenCV.js 準備完了」表示が出れば、各デモがインタラクティブに動作します。
+
+### 2. ビルド & プレビュー
 
 ```bash
-npm run dev       # 開発サーバ（http://localhost:5173）
-npm run build     # 本番ビルド（dist/ に静的成果物を出力）
-npm run preview   # ビルド成果物のローカル確認
+npm run build     # 型チェック (tsc) + 本番ビルド → dist/
+npm run preview   # dist/ をローカル配信して確認
+npm run typecheck # 型チェックのみ
 ```
 
-> ⚠️ Webカメラ機能（Phase 4 以降）は **HTTPS（または localhost）必須**です。`npm run dev` は localhost のため動作します。
+> ⚠️ Webカメラ機能（Phase 4 以降の実装予定分）は **HTTPS（または localhost）必須**です。`npm run dev` は localhost のため動作します。
 
-### 4. デプロイ（静的ホスティング）
+### 3. デプロイ（静的ホスティング）
 
-`npm run build` で生成される `dist/` を静的ホスティング（GitHub Pages / Netlify / Cloudflare Pages 等）に配置します。SPA のため、ルーティングのフォールバック設定（全てを `index.html` に転送）が必要です。詳細は [`docs/spec/non-functional-requirements.md`](docs/spec/non-functional-requirements.md)。
+`npm run build` で生成される `dist/` を静的ホスティング（GitHub Pages / Netlify / Cloudflare Pages 等）に配置します。ルーティングは **HashRouter**（`/#/demos` 形式）、アセットパスは相対（`base: './'`）のため、サーバー側のリライト設定なしでサブパス配信にも対応します。詳細は [`docs/spec/non-functional-requirements.md`](docs/spec/non-functional-requirements.md)。
 
 ---
 
@@ -111,13 +109,23 @@ npm run preview   # ビルド成果物のローカル確認
 
 ---
 
-## 🚧 次の実装ステップ（推奨順）
+## ✅ 実装済み / 🚧 今後の拡張
 
-1. **基盤**: OpenCV.js ローダ → `cv.Mat.delete()` 規約とスコープ自動解放ヘルパ → 画像アップロード/自動リサイズ → Before/After 比較
-2. **Phase 1 デモ**: グレースケール → リサイズ/回転/反転 → ぼかし → 二値化 → Canny → 色抽出
-3. **Phase 2**: 2値化→輪郭検出→形状特徴量、Hough 直線・円
-4. **Phase 3**: ヒストグラム、アフィン/透視変換（→ MVP 完成）
-5. **Phase 4 以降**: Webカメラ・検出・特徴点マッチング・DNN
+**実装済み（31 デモ・インタラクティブ）**
+
+- 基盤: OpenCV.js 遅延ローダ、`Scope` による `cv.Mat.delete()` 自動解放、画像アップロード/自動リサイズ、手続き生成サンプル、Before/After スライダ比較、コード例・処理説明・対応バッジ表示
+- Phase 1: グレースケール / リサイズ / 回転 / 反転 / 明るさ / コントラスト / チャンネル分割 / セピア / RGB-HSV / 色抽出 / 各種ぼかし / シャープ化 / 二値化（通常・大津・適応的） / 形態学（収縮・膨張・オープニング・クロージング） / Canny・Sobel・Laplacian
+- Phase 2: 輪郭検出 / 面積 / 外接矩形 / Hough 直線・円
+- Phase 3（一部）: ヒストグラム均一化
+
+**今後の拡張**
+
+1. **Phase 3 残り**: アフィン/透視変換（4点ドラッグ UI）、書類スキャン、ヒストグラムのチャート描画、CLAHE
+2. **Phase 4**: Webカメラ入力、背景差分、Optical Flow（フレームループ + Web Worker 化）
+3. **Phase 5**: 顔検出（Haar カスケード）、QR、DNN 顔検出
+4. **Phase 6–7**: 特徴点マッチング、パノラマ、DNN 推論
+
+実装の優先順位と完了条件は [`docs/spec/phases.md`](docs/spec/phases.md) を参照。
 
 詳細は [`docs/spec/phases.md`](docs/spec/phases.md) を参照。
 

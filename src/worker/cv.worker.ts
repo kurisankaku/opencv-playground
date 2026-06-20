@@ -156,13 +156,15 @@ ctx.onmessage = async (e: MessageEvent) => {
   }
 
   if (msg.type === 'process') {
-    const { reqId, demoId, params, image } = msg as {
+    const { reqId, demoId, params, image, imageB } = msg as {
       reqId: number;
       demoId: string;
       params: Record<string, any>;
       image: CvImage;
+      imageB?: CvImage;
     };
     let src: any;
+    let srcB: any;
     let result: any;
     try {
       const { cv } = await loadCv();
@@ -172,8 +174,12 @@ ctx.onmessage = async (e: MessageEvent) => {
 
       src = new cv.Mat(image.height, image.width, cv.CV_8UC4);
       src.data.set(image.data);
+      if (imageB) {
+        srcB = new cv.Mat(imageB.height, imageB.width, cv.CV_8UC4);
+        srcB.data.set(imageB.data);
+      }
 
-      result = impl.run(cv, src, params);
+      result = impl.run(cv, src, params, { srcB });
       const msg: any = { type: 'result', reqId, info: result.info ?? [] };
       const transfer: Transferable[] = [];
       if (result.output) {
@@ -188,6 +194,7 @@ ctx.onmessage = async (e: MessageEvent) => {
     } finally {
       result?.output?.delete?.();
       src?.delete?.();
+      srcB?.delete?.();
     }
   }
 };

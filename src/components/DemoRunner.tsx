@@ -6,13 +6,28 @@ import type { ChartData } from '../lib/chartTypes';
 import { renderSample } from '../lib/sampleImages';
 import { CompareView } from './CompareView';
 import { HistogramChart } from './HistogramChart';
+import { SpatialView } from './SpatialView';
+import { TwoImageView } from './TwoImageView';
 import { ImageSource } from './ImageSource';
 import { ParamPanel } from './ParamPanel';
 import { InfoTable } from './InfoTable';
+import type { RuntimeParam } from '../lib/processors';
 
-function defaults(impl: DemoImpl): Record<string, any> {
+/** Convert a spatial param's fractional default into pixel coordinates. */
+function spatialToPixels(p: RuntimeParam, w: number, h: number) {
+  if (p.type === 'rect') {
+    const [fx, fy, fw, fh] = p.default as number[];
+    return [Math.round(fx * w), Math.round(fy * h), Math.round(fw * w), Math.round(fh * h)];
+  }
+  return (p.default as number[][]).map(([fx, fy]) => [Math.round(fx * w), Math.round(fy * h)]);
+}
+
+/** Initial param values; spatial params are converted to pixel coordinates. */
+function initParams(impl: DemoImpl, w: number, h: number): Record<string, any> {
   const o: Record<string, any> = {};
-  for (const p of impl.params) o[p.id] = p.default;
+  for (const p of impl.params) {
+    o[p.id] = p.type === 'points' || p.type === 'rect' ? spatialToPixels(p, w, h) : p.default;
+  }
   return o;
 }
 
@@ -22,18 +37,40 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
   const [sampleId, setSampleId] = useState(impl.defaultSample);
   const [uploaded, setUploaded] = useState(false);
   const [source, setSource] = useState<HTMLCanvasElement>(() => renderSample(impl.defaultSample));
-  const [params, setParams] = useState<Record<string, any>>(() => defaults(impl));
+  const [params, setParams] = useState<Record<string, any>>(() => initParams(impl, source.width, source.height));
   const [info, setInfo] = useState<InfoItem[]>([]);
   const [chart, setChart] = useState<ChartData | null>(null);
   const [busy, setBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const isChart = impl.output === 'chart';
+  const spatialParam = impl.params.find((p) => p.type === 'points' || p.type === 'rect');
+  const isTwo = !!impl.secondSample;
+
+  // Second input image (B) for two-image demos.
+  const [sampleIdB, setSampleIdB] = useState(impl.secondSample ?? 'shapes');
+  const [uploadedB, setUploadedB] = useState(false);
+  const [sourceB, setSourceB] = useState<HTMLCanvasElement | null>(() =>
+    impl.secondSample ? renderSample(impl.secondSample) : null,
+  );
 
   const beforeRef = useRef<HTMLCanvasElement>(null);
   const afterRef = useRef<HTMLCanvasElement>(null);
+  const bRef = useRef<HTMLCanvasElement>(null);
   const token = useRef(0);
+  const dims = useRef({ w: source.width, h: source.height });
+
+  // Draw image B into its thumbnail canvas.
+  useEffect(() => {
+    if (!sourceB) return;
+    const c = bRef.current;
+    if (!c) return;
+    c.width = sourceB.width;
+    c.height = sourceB.height;
+    c.getContext('2d')?.drawImage(sourceB, 0, 0);
+  }, [sourceB]);
 
   // Draw the source into both canvases (after = baseline until processed).
+  // When the image *dimensions* change, re-seed spatial params to fit the new size.
   useEffect(() => {
     for (const ref of [beforeRef, afterRef]) {
       const c = ref.current;
@@ -42,7 +79,17 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
       c.height = source.height;
       c.getContext('2d')?.drawImage(source, 0, 0);
     }
-  }, [source]);
+    if (dims.current.w !== source.width || dims.current.h !== source.height) {
+      dims.current = { w: source.width, h: source.height };
+      setParams((prev) => {
+        const next = { ...prev };
+        for (const p of impl.params) {
+          if (p.type === 'points' || p.type === 'rect') next[p.id] = spatialToPixels(p, source.width, source.height);
+        }
+        return next;
+      });
+    }
+  }, [source, impl]);
 
   // Send the image to the worker (debounced) whenever source or params change.
   useEffect(() => {
@@ -52,7 +99,15 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
       const sctx = source.getContext('2d');
       if (!sctx) return;
       const img = sctx.getImageData(0, 0, source.width, source.height);
-      process(demoId, { data: img.data, width: img.width, height: img.height }, params)
+      let imageB;
+      if (isTwo && sourceB) {
+        const bctx = sourceB.getContext('2d');
+        if (bctx) {
+          const ib = bctx.getImageData(0, 0, sourceB.width, sourceB.height);
+          imageB = { data: ib.data, width: ib.width, height: ib.height };
+        }
+      }
+      process(demoId, { data: img.data, width: img.width, height: img.height }, params, imageB)
         .then((res) => {
           if (myToken !== token.current) return; // a newer request superseded this one
           setChart(res.chart ?? null);
@@ -78,7 +133,7 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
         });
     }, 80);
     return () => clearTimeout(handle);
-  }, [source, params, demoId, process]);
+  }, [source, sourceB, params, demoId, process, isTwo]);
 
   const aspect = source.width / source.height;
 
@@ -113,7 +168,18 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
           </div>
         )}
 
-        {isChart ? (
+        {isTwo ? (
+          <TwoImageView
+            aRef={beforeRef}
+            bRef={bRef}
+            outRef={afterRef}
+            aspectA={aspect}
+            aspectB={sourceB ? sourceB.width / sourceB.height : aspect}
+            isChart={isChart}
+            chart={chart}
+            busy={busy}
+          />
+        ) : isChart ? (
           <div className="space-y-3" data-testid="chart-preview">
             <div className="overflow-hidden rounded-xl border border-line bg-[#06070b]">
               <canvas
@@ -123,6 +189,20 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
               />
             </div>
             <HistogramChart data={chart} busy={busy} />
+          </div>
+        ) : spatialParam ? (
+          <div data-testid="spatial-preview">
+            <SpatialView
+              beforeRef={beforeRef}
+              afterRef={afterRef}
+              aspect={aspect}
+              imgW={source.width}
+              imgH={source.height}
+              param={spatialParam}
+              value={params[spatialParam.id]}
+              onChange={(v) => setParams((prev) => ({ ...prev, [spatialParam.id]: v }))}
+              busy={busy}
+            />
           </div>
         ) : (
           <CompareView
@@ -140,10 +220,11 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
           params={impl.params}
           values={params}
           onChange={(id, value) => setParams((prev) => ({ ...prev, [id]: value }))}
-          onReset={() => setParams(defaults(impl))}
+          onReset={() => setParams(initParams(impl, source.width, source.height))}
         />
         <InfoTable items={info} />
         <ImageSource
+          title={isTwo ? '入力画像 A' : '入力画像'}
           activeSampleId={sampleId}
           uploaded={uploaded}
           onPickSample={(id) => {
@@ -156,6 +237,22 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
             setSource(canvas);
           }}
         />
+        {isTwo && (
+          <ImageSource
+            title="入力画像 B"
+            activeSampleId={sampleIdB}
+            uploaded={uploadedB}
+            onPickSample={(id) => {
+              setUploadedB(false);
+              setSampleIdB(id);
+              setSourceB(renderSample(id));
+            }}
+            onUpload={(canvas) => {
+              setUploadedB(true);
+              setSourceB(canvas);
+            }}
+          />
+        )}
       </div>
     </div>
   );

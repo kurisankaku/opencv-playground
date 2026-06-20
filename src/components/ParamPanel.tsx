@@ -40,6 +40,19 @@ export function ParamPanel({
 }
 
 function Control({ param, value, onChange }: { param: RuntimeParam; value: any; onChange: (v: any) => void }) {
+  if (param.type === 'points' || param.type === 'rect') {
+    return (
+      <div>
+        <label className="mb-1 block text-sm text-fg-dim">{param.label}</label>
+        <p className="rounded-lg border border-dashed border-line/70 bg-surface-2/40 px-3 py-2 text-xs text-fg-dim">
+          {param.type === 'rect'
+            ? 'プレビューの「入力」上をドラッグして矩形を描画。'
+            : 'プレビューの「入力」上の ◍ ハンドルをドラッグして移動。'}
+        </p>
+      </div>
+    );
+  }
+
   if (param.type === 'slider') {
     return (
       <div>

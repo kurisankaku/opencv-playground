@@ -91,12 +91,13 @@ export function processImage(
   demoId: string,
   image: CvImage,
   params: Record<string, any>,
+  imageB?: CvImage,
 ): Promise<ProcessResult> {
   const w = ensureWorker();
   if (status === 'idle') ensureLoaded();
   const reqId = ++reqCounter;
   return new Promise((resolve, reject) => {
     pending.set(reqId, { resolve, reject });
-    w.postMessage({ type: 'process', reqId, demoId, params, image });
+    w.postMessage({ type: 'process', reqId, demoId, params, image, imageB });
   });
 }

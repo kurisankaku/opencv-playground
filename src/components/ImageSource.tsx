@@ -8,11 +8,13 @@ export function ImageSource({
   uploaded,
   onPickSample,
   onUpload,
+  title = '入力画像',
 }: {
   activeSampleId: string | null;
   uploaded: boolean;
   onPickSample: (id: string) => void;
   onUpload: (canvas: HTMLCanvasElement) => void;
+  title?: string;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -28,7 +30,7 @@ export function ImageSource({
 
   return (
     <div className="panel p-4">
-      <p className="eyebrow mb-3">入力画像</p>
+      <p className="eyebrow mb-3">{title}</p>
 
       <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
         {sampleImages.map((s) => {

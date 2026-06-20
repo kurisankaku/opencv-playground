@@ -17,13 +17,21 @@ import { Scope, toGray, toRGB, odd } from './cvUtils';
 export interface RuntimeParam {
   id: string;
   label: string;
-  type: 'slider' | 'select' | 'toggle';
+  type: 'slider' | 'select' | 'toggle' | 'points' | 'rect';
   min?: number;
   max?: number;
   step?: number;
-  default: number | string | boolean;
+  /**
+   * slider/select/toggle: a scalar. 'points': an array of [fx,fy] fractions
+   * (0..1) of image size, one per handle. 'rect': [fx,fy,fw,fh] fractions.
+   * Spatial defaults are fractions so they map onto any image size; DemoRunner
+   * converts them to pixel coordinates before passing to the worker.
+   */
+  default: number | string | boolean | number[] | number[][];
   options?: { label: string; value: string }[];
   hint?: string;
+  count?: number; // 'points': how many draggable handles
+  pointLabels?: string[]; // 'points': optional per-handle labels
 }
 
 export interface InfoItem {
@@ -37,12 +45,18 @@ export interface RunResult {
   info?: InfoItem[];
 }
 
+export interface DemoExtras {
+  srcB?: any; // second input image (RGBA Mat), for two-image demos
+}
+
 export interface DemoImpl {
   defaultSample: string;
   /** Preview kind. 'image' (default) shows the before/after view; 'chart' shows a chart. */
   output?: 'image' | 'chart';
+  /** Set for two-image demos: the default sample id for the second ("B") image. */
+  secondSample?: string;
   params: RuntimeParam[];
-  run: (cv: Cv, src: any, p: Record<string, any>) => RunResult;
+  run: (cv: Cv, src: any, p: Record<string, any>, extras?: DemoExtras) => RunResult;
 }
 
 const num = (v: any, d: number) => (typeof v === 'number' && !Number.isNaN(v) ? v : d);
@@ -73,6 +87,33 @@ function externalContours(cv: Cv, src: any, s: Scope) {
   return { contours, bin };
 }
 
+/**
+ * Largest foreground contour, robust to background polarity. Picks Otsu
+ * threshold direction from the corner (background) brightness so it works on
+ * both dark-objects-on-light-bg and light-objects-on-dark-bg, and skips any
+ * near-full-image contour (the background frame). Returns the MatVector
+ * (tracked in `s`) and the index of the largest object contour (or -1).
+ */
+function largestContour(cv: Cv, mat: any, s: Scope) {
+  const gray = s.t(toGray(cv, mat));
+  const d = gray.data;
+  const w = gray.cols, h = gray.rows;
+  const bgBright = (d[0] + d[w - 1] + d[(h - 1) * w] + d[h * w - 1]) / 4;
+  const bin = s.t(new cv.Mat());
+  const type = bgBright > 127 ? cv.THRESH_BINARY_INV : cv.THRESH_BINARY;
+  cv.threshold(gray, bin, 0, 255, type + cv.THRESH_OTSU);
+  const contours = s.t(new cv.MatVector());
+  const hierarchy = s.t(new cv.Mat());
+  cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  const full = w * h * 0.92;
+  let best = -1, bestArea = 0;
+  for (let i = 0; i < contours.size(); i++) {
+    const a = cv.contourArea(contours.get(i));
+    if (a > bestArea && a < full) { bestArea = a; best = i; }
+  }
+  return { contours, best };
+}
+
 /** 4 corners of a minAreaRect, computed from center/size/angle (no boxPoints binding needed). */
 function rotatedRectPoints(rr: any): { x: number; y: number }[] {
   const cx = rr.center.x, cy = rr.center.y, w = rr.size.width, h = rr.size.height;
@@ -95,6 +136,68 @@ function orderQuad(pts: { x: number; y: number }[]): { x: number; y: number }[] 
 
 const dist2 = (a: { x: number; y: number }, b: { x: number; y: number }) =>
   Math.hypot(a.x - b.x, a.y - b.y);
+
+/** Clamp a spatial 'rect' param value ([x,y,w,h] px) to lie within the image. */
+function clampRect(rect: any, cols: number, rows: number): [number, number, number, number] {
+  const r = Array.isArray(rect) && rect.length === 4 ? rect : [0, 0, cols, rows];
+  let x = Math.round(r[0]), y = Math.round(r[1]), w = Math.round(r[2]), h = Math.round(r[3]);
+  x = Math.max(0, Math.min(x, cols - 1));
+  y = Math.max(0, Math.min(y, rows - 1));
+  w = Math.max(1, Math.min(w, cols - x));
+  h = Math.max(1, Math.min(h, rows - y));
+  return [x, y, w, h];
+}
+
+/** Clamp a spatial point ([x,y] px) into the image bounds. */
+function clampPoint(pt: any, cols: number, rows: number): [number, number] {
+  const x = Math.max(0, Math.min(Math.round(pt?.[0] ?? 0), cols - 1));
+  const y = Math.max(0, Math.min(Math.round(pt?.[1] ?? 0), rows - 1));
+  return [x, y];
+}
+
+/** ORB detect+compute on a gray Mat; returns keypoint pixel coords + descriptor Mat (tracked in s). */
+function orbDetect(cv: Cv, gray: any, s: Scope, n = 500) {
+  const orb = s.t(new cv.ORB(n));
+  const kp = s.t(new cv.KeyPointVector());
+  const des = s.t(new cv.Mat());
+  const mask = s.t(new cv.Mat());
+  orb.detectAndCompute(gray, mask, kp, des);
+  const pts: [number, number][] = [];
+  for (let i = 0; i < kp.size(); i++) {
+    const k = kp.get(i);
+    pts.push([k.pt.x, k.pt.y]);
+  }
+  return { pts, des };
+}
+
+/** Brute-force Hamming match, sorted ascending by distance, top n. */
+function bfMatchTopN(cv: Cv, desA: any, desB: any, s: Scope, n: number, crossCheck: boolean) {
+  const out: { q: number; t: number; d: number }[] = [];
+  if (desA.rows === 0 || desB.rows === 0) return out;
+  const bf = s.t(new cv.BFMatcher(cv.NORM_HAMMING, crossCheck));
+  const matches = s.t(new cv.DMatchVector());
+  bf.match(desA, desB, matches);
+  for (let i = 0; i < matches.size(); i++) {
+    const m = matches.get(i);
+    out.push({ q: m.queryIdx, t: m.trainIdx, d: m.distance });
+  }
+  out.sort((a, b) => a.d - b.d);
+  return out.slice(0, n);
+}
+
+/** Composite two RGB Mats side by side onto a dark canvas; returns the output Mat + B's x-offset. */
+function sideBySide(cv: Cv, a: any, b: any) {
+  const H = Math.max(a.rows, b.rows);
+  const out = new cv.Mat(H, a.cols + b.cols, cv.CV_8UC3, new cv.Scalar(13, 16, 24));
+  const sa = new Scope();
+  try {
+    a.copyTo(sa.t(out.roi(new cv.Rect(0, 0, a.cols, a.rows))));
+    b.copyTo(sa.t(out.roi(new cv.Rect(a.cols, 0, b.cols, b.rows))));
+  } finally {
+    sa.done();
+  }
+  return { out, offX: a.cols };
+}
 
 export const impls: Record<string, DemoImpl> = {
   // ---------------- image-basics ----------------
@@ -1695,6 +1798,525 @@ export const impls: Record<string, DemoImpl> = {
           cv.circle(out, new cv.Point(k.pt.x, k.pt.y), Math.max(2, Math.round(k.size / 2)), ACCENT(cv), 1);
         }
         return { output: out, info: [{ label: '特徴点数', value: `${nk}` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  // ---------------- spatial input (point / rect drawing) ----------------
+  'image-crop': {
+    defaultSample: 'scene',
+    params: [{ id: 'rect', label: '切り抜き範囲', type: 'rect', default: [0.22, 0.2, 0.5, 0.5] }],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const [x, y, w, h] = clampRect(p.rect, src.cols, src.rows);
+        const view = s.t(src.roi(new cv.Rect(x, y, w, h)));
+        const out = view.clone();
+        return { output: out, info: [{ label: 'ROI', value: `${w}×${h} px @ (${x}, ${y})` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'flood-fill': {
+    defaultSample: 'shapes',
+    params: [
+      { id: 'seed', label: '開始点', type: 'points', count: 1, pointLabels: ['開始点'], default: [[0.5, 0.28]] },
+      { id: 'tol', label: '許容差', type: 'slider', min: 0, max: 80, step: 1, default: 22 },
+      {
+        id: 'color',
+        label: '塗り色',
+        type: 'select',
+        default: 'violet',
+        options: [
+          { label: '紫', value: 'violet' },
+          { label: 'シアン', value: 'cyan' },
+          { label: '赤', value: 'red' },
+        ],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const rgb = s.t(toRGB(cv, src));
+        const out = rgb.clone();
+        const [sx, sy] = clampPoint((p.seed && p.seed[0]) || [src.cols / 2, src.rows / 2], src.cols, src.rows);
+        const tol = num(p.tol, 22);
+        const palette: Record<string, [number, number, number]> = {
+          violet: [124, 92, 255], cyan: [34, 211, 238], red: [255, 77, 109],
+        };
+        const c = palette[str(p.color, 'violet')] ?? palette.violet;
+        const mask = s.t(new cv.Mat(src.rows + 2, src.cols + 2, cv.CV_8U, new cv.Scalar(0)));
+        const rect = new cv.Rect();
+        cv.floodFill(
+          out, mask, new cv.Point(sx, sy), new cv.Scalar(c[0], c[1], c[2], 255), rect,
+          new cv.Scalar(tol, tol, tol, tol), new cv.Scalar(tol, tol, tol, tol), 8,
+        );
+        const area = cv.countNonZero(s.t(mask.roi(new cv.Rect(1, 1, src.cols, src.rows))));
+        cv.circle(out, new cv.Point(sx, sy), 6, new cv.Scalar(255, 255, 255, 255), 2);
+        return {
+          output: out,
+          info: [
+            { label: '開始点', value: `(${sx}, ${sy})` },
+            { label: '塗り面積', value: `${((area / (src.cols * src.rows)) * 100).toFixed(1)} %` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'affine-transform': {
+    defaultSample: 'shapes',
+    params: [
+      {
+        id: 'points',
+        label: '変換先の3点（元画像の左上・右上・左下が動く先）',
+        type: 'points',
+        count: 3,
+        pointLabels: ['左上', '右上', '左下'],
+        default: [[0.12, 0.16], [0.84, 0.1], [0.22, 0.86]],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const W = src.cols, H = src.rows;
+        const d = p.points && p.points.length === 3 ? p.points : [[0, 0], [W, 0], [0, H]];
+        const srcTri = s.t(cv.matFromArray(3, 1, cv.CV_32FC2, [0, 0, W, 0, 0, H]));
+        const dstTri = s.t(cv.matFromArray(3, 1, cv.CV_32FC2,
+          [d[0][0], d[0][1], d[1][0], d[1][1], d[2][0], d[2][1]]));
+        const M = s.t(cv.getAffineTransform(srcTri, dstTri));
+        const out = new cv.Mat();
+        cv.warpAffine(src, out, M, new cv.Size(W, H), cv.INTER_LINEAR, cv.BORDER_CONSTANT,
+          new cv.Scalar(13, 16, 24, 255));
+        return { output: out };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'perspective-transform': {
+    defaultSample: 'document',
+    params: [
+      {
+        id: 'points',
+        label: '変換元の4点（この四角形を正面化）',
+        type: 'points',
+        count: 4,
+        pointLabels: ['左上', '右上', '右下', '左下'],
+        default: [[0.22, 0.16], [0.8, 0.22], [0.84, 0.84], [0.16, 0.8]],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const W = src.cols, H = src.rows;
+        const q = p.points && p.points.length === 4 ? p.points : [[0, 0], [W, 0], [W, H], [0, H]];
+        const srcQ = s.t(cv.matFromArray(4, 1, cv.CV_32FC2,
+          [q[0][0], q[0][1], q[1][0], q[1][1], q[2][0], q[2][1], q[3][0], q[3][1]]));
+        const dstQ = s.t(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, W, 0, W, H, 0, H]));
+        const M = s.t(cv.getPerspectiveTransform(srcQ, dstQ));
+        const out = new cv.Mat();
+        cv.warpPerspective(src, out, M, new cv.Size(W, H), cv.INTER_LINEAR, cv.BORDER_CONSTANT,
+          new cv.Scalar(13, 16, 24, 255));
+        return { output: out };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'grabcut': {
+    defaultSample: 'colored-objects',
+    params: [
+      { id: 'rect', label: '前景を囲む矩形', type: 'rect', default: [0.12, 0.12, 0.74, 0.74] },
+      { id: 'iter', label: '反復回数', type: 'slider', min: 1, max: 5, step: 1, default: 3 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const rgb0 = s.t(toRGB(cv, src));
+        // GrabCut is heavy — run on a downscaled copy, then upscale the mask.
+        const maxW = 320;
+        const scale = rgb0.cols > maxW ? maxW / rgb0.cols : 1;
+        const rgb = scale < 1 ? s.t(new cv.Mat()) : rgb0;
+        if (scale < 1) {
+          cv.resize(rgb0, rgb, new cv.Size(Math.round(rgb0.cols * scale), Math.round(rgb0.rows * scale)), 0, 0, cv.INTER_AREA);
+        }
+        const [fx, fy, fw, fh] = clampRect(p.rect, src.cols, src.rows);
+        let x = Math.round(fx * scale), y = Math.round(fy * scale);
+        let w = Math.round(fw * scale), h = Math.round(fh * scale);
+        x = Math.max(1, Math.min(x, rgb.cols - 3));
+        y = Math.max(1, Math.min(y, rgb.rows - 3));
+        w = Math.max(2, Math.min(w, rgb.cols - x - 1));
+        h = Math.max(2, Math.min(h, rgb.rows - y - 1));
+        const mask = s.t(new cv.Mat());
+        const bgd = s.t(new cv.Mat());
+        const fgd = s.t(new cv.Mat());
+        cv.grabCut(rgb, mask, new cv.Rect(x, y, w, h), bgd, fgd, Math.round(num(p.iter, 3)), cv.GC_INIT_WITH_RECT);
+        // mask: 1/3 = (probable) foreground. Upscale the fg mask to full size.
+        const fgSmall = s.t(new cv.Mat(rgb.rows, rgb.cols, cv.CV_8U, new cv.Scalar(0)));
+        const ms = mask.data, fs = fgSmall.data;
+        for (let i = 0; i < rgb.rows * rgb.cols; i++) fs[i] = ms[i] === 1 || ms[i] === 3 ? 255 : 0;
+        const fgFull = s.t(new cv.Mat());
+        cv.resize(fgSmall, fgFull, new cv.Size(src.cols, src.rows), 0, 0, cv.INTER_NEAREST);
+        const out = new cv.Mat(src.rows, src.cols, cv.CV_8UC3, new cv.Scalar(15, 18, 26));
+        rgb0.copyTo(out, fgFull);
+        const fgCount = cv.countNonZero(fgFull);
+        return {
+          output: out,
+          info: [{ label: '前景の割合', value: `${((fgCount / (src.cols * src.rows)) * 100).toFixed(1)} %` }],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  // ---------------- two-image demos ----------------
+  'image-arithmetic': {
+    defaultSample: 'scene',
+    secondSample: 'colored-objects',
+    params: [
+      {
+        id: 'op',
+        label: '演算',
+        type: 'select',
+        default: 'blend',
+        options: [
+          { label: '加重合成 (blend)', value: 'blend' },
+          { label: '加算 (add)', value: 'add' },
+          { label: '減算 (A−B)', value: 'subtract' },
+          { label: '差分 (|A−B|)', value: 'absdiff' },
+        ],
+      },
+      { id: 'alpha', label: '画像Aの重み α (blend時)', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5 },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const a = s.t(toRGB(cv, src));
+        if (!extras?.srcB) return { output: a.clone() };
+        const bRaw = s.t(toRGB(cv, extras.srcB));
+        const b = s.t(new cv.Mat());
+        cv.resize(bRaw, b, new cv.Size(a.cols, a.rows), 0, 0, cv.INTER_AREA);
+        const op = str(p.op, 'blend');
+        const out = new cv.Mat();
+        if (op === 'add') cv.add(a, b, out);
+        else if (op === 'subtract') cv.subtract(a, b, out);
+        else if (op === 'absdiff') cv.absdiff(a, b, out);
+        else {
+          const al = num(p.alpha, 0.5);
+          cv.addWeighted(a, al, b, 1 - al, 0, out);
+        }
+        return { output: out, info: [{ label: '演算', value: op }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'histogram-comparison': {
+    defaultSample: 'scene',
+    secondSample: 'dark',
+    output: 'chart',
+    params: [
+      {
+        id: 'method',
+        label: '比較法',
+        type: 'select',
+        default: 'correl',
+        options: [
+          { label: '相関 (Correlation)', value: 'correl' },
+          { label: 'カイ二乗 (Chi-Square)', value: 'chisqr' },
+          { label: '交差 (Intersection)', value: 'intersect' },
+          { label: 'Bhattacharyya', value: 'bhattacharyya' },
+        ],
+      },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const bins = 64;
+        const histOf = (mat: any) => {
+          const gray = s.t(toGray(cv, mat));
+          const vec = s.t(new cv.MatVector());
+          vec.push_back(gray);
+          const h = s.t(new cv.Mat());
+          const mask = s.t(new cv.Mat());
+          cv.calcHist(vec, [0], mask, h, [bins], [0, 256], false);
+          return h;
+        };
+        const readVals = (h: any) => {
+          const v: number[] = [];
+          for (let i = 0; i < bins; i++) v.push(h.data32F[i]);
+          return v;
+        };
+        const hA = histOf(src);
+        const series = [{ label: '画像A', color: '#7c5cff', values: readVals(hA) }];
+        let scoreLabel = 'B画像なし';
+        if (extras?.srcB) {
+          const hB = histOf(extras.srcB);
+          series.push({ label: '画像B', color: '#22d3ee', values: readVals(hB) });
+          const hAn = s.t(new cv.Mat());
+          const hBn = s.t(new cv.Mat());
+          cv.normalize(hA, hAn, 0, 1, cv.NORM_MINMAX);
+          cv.normalize(hB, hBn, 0, 1, cv.NORM_MINMAX);
+          const methods: Record<string, number> = {
+            correl: cv.HISTCMP_CORREL, chisqr: cv.HISTCMP_CHISQR,
+            intersect: cv.HISTCMP_INTERSECT, bhattacharyya: cv.HISTCMP_BHATTACHARYYA,
+          };
+          const m = str(p.method, 'correl');
+          const d = cv.compareHist(hAn, hBn, methods[m] ?? cv.HISTCMP_CORREL);
+          scoreLabel = `${m} = ${d.toFixed(4)}`;
+        }
+        return {
+          chart: { type: 'histogram', bins, range: 255, series, xLabel: `類似度 ${scoreLabel}` },
+          info: [{ label: '類似度', value: scoreLabel }],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'shape-matching': {
+    defaultSample: 'shapes',
+    secondSample: 'coins',
+    params: [
+      {
+        id: 'method',
+        label: '比較法 (Huモーメント)',
+        type: 'select',
+        default: '1',
+        options: [
+          { label: 'I1', value: '1' },
+          { label: 'I2', value: '2' },
+          { label: 'I3', value: '3' },
+        ],
+      },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const H = 320;
+        const prep = (mat: any) => {
+          const rgb = s.t(toRGB(cv, mat));
+          const { contours, best } = largestContour(cv, mat, s);
+          if (best >= 0) cv.drawContours(rgb, contours, best, ACCENT(cv), 5);
+          const scaled = s.t(new cv.Mat());
+          const w = Math.max(1, Math.round((rgb.cols * H) / rgb.rows));
+          cv.resize(rgb, scaled, new cv.Size(w, H), 0, 0, cv.INTER_AREA);
+          return { scaled, contour: best >= 0 ? s.t(contours.get(best)) : null };
+        };
+        const A = prep(src);
+        const B = extras?.srcB ? prep(extras.srcB) : null;
+        const wB = B ? B.scaled.cols + 8 : 0;
+        const out = new cv.Mat(H, A.scaled.cols + wB, cv.CV_8UC3, new cv.Scalar(13, 16, 24));
+        A.scaled.copyTo(s.t(out.roi(new cv.Rect(0, 0, A.scaled.cols, H))));
+        if (B) B.scaled.copyTo(s.t(out.roi(new cv.Rect(A.scaled.cols + 8, 0, B.scaled.cols, H))));
+        let score = '—';
+        if (A.contour && B?.contour) {
+          const method = Number(str(p.method, '1'));
+          score = cv.matchShapes(A.contour, B.contour, method, 0).toFixed(4);
+        }
+        cv.putText(out, `match = ${score}`, new cv.Point(10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.9, ACCENT2(cv), 2);
+        return { output: out, info: [{ label: '形状の差 (0=同一)', value: score }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'template-matching': {
+    defaultSample: 'shapes',
+    secondSample: 'shapes',
+    params: [
+      {
+        id: 'method',
+        label: '評価法',
+        type: 'select',
+        default: 'ccoeff',
+        options: [
+          { label: 'CCOEFF_NORMED', value: 'ccoeff' },
+          { label: 'CCORR_NORMED', value: 'ccorr' },
+          { label: 'SQDIFF_NORMED', value: 'sqdiff' },
+        ],
+      },
+      { id: 'threshold', label: '検出しきい値', type: 'slider', min: 0.3, max: 1, step: 0.01, default: 0.85 },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const aGray = s.t(toGray(cv, src));
+        if (!extras?.srcB) return { output: src.clone() };
+        const bGray0 = s.t(toGray(cv, extras.srcB));
+        const bGray = s.t(new cv.Mat());
+        cv.resize(bGray0, bGray, new cv.Size(aGray.cols, aGray.rows), 0, 0, cv.INTER_AREA);
+        // template = centre crop of B
+        const tw = Math.round(aGray.cols * 0.42);
+        const th = Math.round(aGray.rows * 0.42);
+        const tx = Math.round((aGray.cols - tw) / 2);
+        const ty = Math.round((aGray.rows - th) / 2);
+        const tmpl = s.t(bGray.roi(new cv.Rect(tx, ty, tw, th)));
+        const res = s.t(new cv.Mat());
+        const methods: Record<string, number> = {
+          ccoeff: cv.TM_CCOEFF_NORMED, ccorr: cv.TM_CCORR_NORMED, sqdiff: cv.TM_SQDIFF_NORMED,
+        };
+        const mkey = str(p.method, 'ccoeff');
+        cv.matchTemplate(aGray, tmpl, res, methods[mkey] ?? cv.TM_CCOEFF_NORMED);
+        const mm = cv.minMaxLoc(res);
+        const isSq = mkey === 'sqdiff';
+        const best = isSq ? mm.minLoc : mm.maxLoc;
+        const bestScore = isSq ? 1 - mm.minVal : mm.maxVal;
+        const out = src.clone();
+        const thr = num(p.threshold, 0.85);
+        // faint boxes for every above-threshold location
+        const rd = res.data32F;
+        let hits = 0;
+        for (let y = 0; y < res.rows; y += 3) {
+          for (let x = 0; x < res.cols; x += 3) {
+            const v = rd[y * res.cols + x];
+            const pass = isSq ? v <= 1 - thr : v >= thr;
+            if (pass) {
+              cv.rectangle(out, new cv.Point(x, y), new cv.Point(x + tw, y + th), new cv.Scalar(124, 92, 255, 160), 1);
+              hits++;
+            }
+          }
+        }
+        cv.rectangle(out, new cv.Point(best.x, best.y), new cv.Point(best.x + tw, best.y + th), ACCENT2(cv), 3);
+        return {
+          output: out,
+          info: [
+            { label: '最良スコア', value: bestScore.toFixed(3) },
+            { label: '採用箇所', value: `${hits}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'feature-matching': {
+    defaultSample: 'noisy',
+    secondSample: 'noisy',
+    params: [
+      { id: 'maxMatches', label: '表示マッチ数', type: 'slider', min: 5, max: 80, step: 5, default: 30 },
+      { id: 'rotateB', label: '画像Bを回転 (°)', type: 'slider', min: 0, max: 90, step: 5, default: 25 },
+      { id: 'crossCheck', label: 'クロスチェック', type: 'toggle', default: true },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const aRgb = s.t(toRGB(cv, src));
+        let bRgb: any;
+        if (extras?.srcB) {
+          const b0 = s.t(toRGB(cv, extras.srcB));
+          const ang = num(p.rotateB, 25);
+          if (ang !== 0) {
+            const M = s.t(cv.getRotationMatrix2D(new cv.Point(b0.cols / 2, b0.rows / 2), ang, 1));
+            bRgb = s.t(new cv.Mat());
+            cv.warpAffine(b0, bRgb, M, new cv.Size(b0.cols, b0.rows), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(13, 16, 24));
+          } else bRgb = b0;
+        } else bRgb = s.t(aRgb.clone());
+        const gA = s.t(new cv.Mat()); cv.cvtColor(aRgb, gA, cv.COLOR_RGB2GRAY);
+        const gB = s.t(new cv.Mat()); cv.cvtColor(bRgb, gB, cv.COLOR_RGB2GRAY);
+        const A = orbDetect(cv, gA, s, 500);
+        const B = orbDetect(cv, gB, s, 500);
+        const top = bfMatchTopN(cv, A.des, B.des, s, Math.round(num(p.maxMatches, 30)), p.crossCheck !== false);
+        const { out, offX } = sideBySide(cv, aRgb, bRgb);
+        for (const m of top) {
+          const pa = A.pts[m.q], pb = B.pts[m.t];
+          if (!pa || !pb) continue;
+          cv.line(out, new cv.Point(pa[0], pa[1]), new cv.Point(pb[0] + offX, pb[1]), ACCENT(cv), 1);
+          cv.circle(out, new cv.Point(pa[0], pa[1]), 3, ACCENT2(cv), 1);
+          cv.circle(out, new cv.Point(pb[0] + offX, pb[1]), 3, ACCENT2(cv), 1);
+        }
+        return {
+          output: out,
+          info: [
+            { label: '特徴点 A / B', value: `${A.pts.length} / ${B.pts.length}` },
+            { label: '表示マッチ数', value: `${top.length}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'homography-estimation': {
+    defaultSample: 'noisy',
+    secondSample: 'noisy',
+    params: [
+      { id: 'rotateB', label: '画像Bを回転 (°)', type: 'slider', min: 0, max: 60, step: 5, default: 25 },
+      { id: 'ransac', label: 'RANSAC 閾値', type: 'slider', min: 1, max: 20, step: 1, default: 5 },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const aRgb = s.t(toRGB(cv, src));
+        let bRgb: any;
+        if (extras?.srcB) {
+          const b0 = s.t(toRGB(cv, extras.srcB));
+          const ang = num(p.rotateB, 25);
+          if (ang !== 0) {
+            const M = s.t(cv.getRotationMatrix2D(new cv.Point(b0.cols / 2, b0.rows / 2), ang, 1));
+            bRgb = s.t(new cv.Mat());
+            cv.warpAffine(b0, bRgb, M, new cv.Size(b0.cols, b0.rows), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(13, 16, 24));
+          } else bRgb = b0;
+        } else bRgb = s.t(aRgb.clone());
+        const gA = s.t(new cv.Mat()); cv.cvtColor(aRgb, gA, cv.COLOR_RGB2GRAY);
+        const gB = s.t(new cv.Mat()); cv.cvtColor(bRgb, gB, cv.COLOR_RGB2GRAY);
+        const A = orbDetect(cv, gA, s, 700);
+        const B = orbDetect(cv, gB, s, 700);
+        const top = bfMatchTopN(cv, A.des, B.des, s, 80, true);
+        const { out, offX } = sideBySide(cv, aRgb, bRgb);
+        let inliers = 0;
+        if (top.length >= 4) {
+          const srcArr: number[] = [];
+          const dstArr: number[] = [];
+          for (const m of top) {
+            const pa = A.pts[m.q], pb = B.pts[m.t];
+            if (!pa || !pb) continue;
+            srcArr.push(pa[0], pa[1]);
+            dstArr.push(pb[0], pb[1]);
+          }
+          const nPts = srcArr.length / 2;
+          if (nPts >= 4) {
+            const srcM = s.t(cv.matFromArray(nPts, 1, cv.CV_32FC2, srcArr));
+            const dstM = s.t(cv.matFromArray(nPts, 1, cv.CV_32FC2, dstArr));
+            const mask = s.t(new cv.Mat());
+            const Hm = s.t(cv.findHomography(srcM, dstM, cv.RANSAC, num(p.ransac, 5), mask));
+            if (Hm && !Hm.empty()) {
+              const corners = s.t(cv.matFromArray(4, 1, cv.CV_32FC2,
+                [0, 0, aRgb.cols, 0, aRgb.cols, aRgb.rows, 0, aRgb.rows]));
+              const proj = s.t(new cv.Mat());
+              cv.perspectiveTransform(corners, proj, Hm);
+              for (let i = 0; i < 4; i++) {
+                const x1 = proj.data32F[i * 2] + offX, y1 = proj.data32F[i * 2 + 1];
+                const j = (i + 1) % 4;
+                const x2 = proj.data32F[j * 2] + offX, y2 = proj.data32F[j * 2 + 1];
+                cv.line(out, new cv.Point(x1, y1), new cv.Point(x2, y2), ACCENT(cv), 4);
+              }
+              inliers = cv.countNonZero(mask);
+            }
+          }
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'マッチ数', value: `${top.length}` },
+            { label: 'インライア (RANSAC)', value: `${inliers}` },
+          ],
+        };
       } finally {
         s.done();
       }

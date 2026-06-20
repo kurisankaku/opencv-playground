@@ -47,12 +47,18 @@ export interface RunResult {
 
 export interface DemoExtras {
   srcB?: any; // second input image (RGBA Mat), for two-image demos
+  /** Persistent per-demo store for video demos (survives across frames; cv objects auto-freed on reset). */
+  state?: Record<string, any>;
+  /** True on the first frame after a (re)start — video demos (re)initialize their state. */
+  firstFrame?: boolean;
 }
 
 export interface DemoImpl {
   defaultSample: string;
   /** Preview kind. 'image' (default) shows the before/after view; 'chart' shows a chart. */
   output?: 'image' | 'chart';
+  /** 'video' streams webcam frames through a stateful frame loop instead of a static image. */
+  input?: 'video';
   /** Set for two-image demos: the default sample id for the second ("B") image. */
   secondSample?: string;
   params: RuntimeParam[];
@@ -2317,6 +2323,324 @@ export const impls: Record<string, DemoImpl> = {
             { label: 'インライア (RANSAC)', value: `${inliers}` },
           ],
         };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  // ---------------- video / camera demos (stateful frame loop) ----------------
+  'webcam-capture': {
+    defaultSample: 'scene',
+    input: 'video',
+    params: [
+      {
+        id: 'filter',
+        label: 'フィルタ',
+        type: 'select',
+        default: 'none',
+        options: [
+          { label: 'なし', value: 'none' },
+          { label: 'グレースケール', value: 'gray' },
+          { label: 'Canny エッジ', value: 'canny' },
+          { label: 'セピア', value: 'sepia' },
+          { label: '色反転', value: 'invert' },
+        ],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const f = str(p.filter, 'none');
+        if (f === 'gray') {
+          const out = new cv.Mat();
+          cv.cvtColor(src, out, cv.COLOR_RGBA2GRAY);
+          return { output: out };
+        }
+        if (f === 'invert') {
+          const rgb = s.t(toRGB(cv, src));
+          const out = new cv.Mat();
+          cv.bitwise_not(rgb, out);
+          return { output: out };
+        }
+        if (f === 'canny') {
+          const g = s.t(toGray(cv, src));
+          const out = new cv.Mat();
+          cv.Canny(g, out, 50, 150);
+          return { output: out };
+        }
+        if (f === 'sepia') {
+          const rgb = s.t(toRGB(cv, src));
+          const m = s.t(cv.matFromArray(3, 3, cv.CV_32F,
+            [0.393, 0.769, 0.189, 0.349, 0.686, 0.168, 0.272, 0.534, 0.131]));
+          const out = new cv.Mat();
+          cv.transform(rgb, out, m);
+          return { output: out };
+        }
+        return { output: src.clone() };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'background-subtraction': {
+    defaultSample: 'scene',
+    input: 'video',
+    params: [
+      { id: 'varThreshold', label: '感度 (varThreshold)', type: 'slider', min: 8, max: 64, step: 2, default: 16 },
+      {
+        id: 'show',
+        label: '表示',
+        type: 'select',
+        default: 'mask',
+        options: [
+          { label: '前景マスク', value: 'mask' },
+          { label: '前景のみ', value: 'fg' },
+        ],
+      },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const st = extras?.state ?? {};
+        const vt = num(p.varThreshold, 16);
+        if (extras?.firstFrame || !st.bg || st.vt !== vt) {
+          st.bg?.delete?.();
+          st.bg = new cv.BackgroundSubtractorMOG2(200, vt, true);
+          st.vt = vt;
+        }
+        const rgb = s.t(toRGB(cv, src));
+        const fg = s.t(new cv.Mat());
+        st.bg.apply(rgb, fg);
+        const mask = s.t(new cv.Mat());
+        cv.threshold(fg, mask, 200, 255, cv.THRESH_BINARY); // drop MOG2 shadow (=127)
+        if (str(p.show, 'mask') === 'mask') return { output: mask.clone() };
+        const out = new cv.Mat(src.rows, src.cols, cv.CV_8UC3, new cv.Scalar(15, 18, 26));
+        rgb.copyTo(out, mask);
+        return { output: out, info: [{ label: '前景率', value: `${((cv.countNonZero(mask) / (src.rows * src.cols)) * 100).toFixed(1)} %` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'frame-differencing': {
+    defaultSample: 'scene',
+    input: 'video',
+    params: [
+      { id: 'thresh', label: 'しきい値', type: 'slider', min: 5, max: 80, step: 1, default: 25 },
+      {
+        id: 'show',
+        label: '表示',
+        type: 'select',
+        default: 'overlay',
+        options: [
+          { label: '動体ハイライト', value: 'overlay' },
+          { label: '差分マスク', value: 'mask' },
+        ],
+      },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const st = extras?.state ?? {};
+        const gray = s.t(toGray(cv, src));
+        if (!st.prev) {
+          st.prev = gray.clone();
+          return { output: new cv.Mat(src.rows, src.cols, cv.CV_8UC1, new cv.Scalar(0)) };
+        }
+        const diff = s.t(new cv.Mat());
+        cv.absdiff(gray, st.prev, diff);
+        const mask = s.t(new cv.Mat());
+        cv.threshold(diff, mask, num(p.thresh, 25), 255, cv.THRESH_BINARY);
+        st.prev.delete();
+        st.prev = gray.clone();
+        const motion = ((cv.countNonZero(mask) / (src.rows * src.cols)) * 100).toFixed(1);
+        if (str(p.show, 'overlay') === 'mask') return { output: mask.clone(), info: [{ label: '動き', value: `${motion} %` }] };
+        const out = s.t(toRGB(cv, src)).clone();
+        const od = out.data, md = mask.data;
+        const n = src.rows * src.cols;
+        for (let i = 0; i < n; i++) {
+          if (md[i]) { od[i * 3] = 255; od[i * 3 + 1] = 64; od[i * 3 + 2] = 64; }
+        }
+        return { output: out, info: [{ label: '動き', value: `${motion} %` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'optical-flow-lk': {
+    defaultSample: 'scene',
+    input: 'video',
+    params: [
+      { id: 'maxCorners', label: '追跡点数', type: 'slider', min: 20, max: 300, step: 10, default: 120 },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const st = extras?.state ?? {};
+        const gray = s.t(toGray(cv, src));
+        const maxC = Math.round(num(p.maxCorners, 120));
+        const needDetect = extras?.firstFrame || !st.prevGray || !st.pts || st.pts.rows < 12 || (st.frame ?? 0) % 25 === 0;
+        if (needDetect) {
+          st.pts?.delete?.();
+          const pts = new cv.Mat();
+          cv.goodFeaturesToTrack(gray, pts, maxC, 0.01, 10);
+          st.pts = pts;
+          st.prevGray?.delete?.();
+          st.prevGray = gray.clone();
+          st.frame = (st.frame ?? 0) + 1;
+          const out = src.clone();
+          for (let i = 0; i < pts.rows; i++) {
+            cv.circle(out, new cv.Point(pts.data32F[i * 2], pts.data32F[i * 2 + 1]), 3, ACCENT2(cv), -1);
+          }
+          return { output: out, info: [{ label: '追跡点', value: `${pts.rows}` }] };
+        }
+        const next = s.t(new cv.Mat());
+        const status = s.t(new cv.Mat());
+        const err = s.t(new cv.Mat());
+        cv.calcOpticalFlowPyrLK(st.prevGray, gray, st.pts, next, status, err);
+        const out = src.clone();
+        const good: number[] = [];
+        for (let i = 0; i < status.rows; i++) {
+          if (status.data[i] === 1) {
+            const x0 = st.pts.data32F[i * 2], y0 = st.pts.data32F[i * 2 + 1];
+            const x1 = next.data32F[i * 2], y1 = next.data32F[i * 2 + 1];
+            cv.line(out, new cv.Point(x0, y0), new cv.Point(x1, y1), ACCENT(cv), 2);
+            cv.circle(out, new cv.Point(x1, y1), 3, ACCENT2(cv), -1);
+            good.push(x1, y1);
+          }
+        }
+        st.prevGray.delete();
+        st.prevGray = gray.clone();
+        st.pts.delete();
+        const np = new cv.Mat(good.length / 2, 1, cv.CV_32FC2);
+        for (let i = 0; i < good.length; i++) np.data32F[i] = good[i];
+        st.pts = np;
+        st.frame = (st.frame ?? 0) + 1;
+        return { output: out, info: [{ label: '追跡点', value: `${good.length / 2}` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'dense-optical-flow': {
+    defaultSample: 'scene',
+    input: 'video',
+    params: [
+      { id: 'amp', label: '動きの強調', type: 'slider', min: 1, max: 12, step: 1, default: 4 },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const st = extras?.state ?? {};
+        // Downscale for Farneback performance, then upscale the colour map.
+        const grayFull = s.t(toGray(cv, src));
+        const W = 240, H = Math.max(1, Math.round((src.rows / src.cols) * 240));
+        const gray = s.t(new cv.Mat());
+        cv.resize(grayFull, gray, new cv.Size(W, H), 0, 0, cv.INTER_AREA);
+        if (!st.prevGray) {
+          st.prevGray = gray.clone();
+          return { output: new cv.Mat(src.rows, src.cols, cv.CV_8UC3, new cv.Scalar(15, 18, 26)) };
+        }
+        const flow = s.t(new cv.Mat());
+        cv.calcOpticalFlowFarneback(st.prevGray, gray, flow, 0.5, 3, 15, 3, 5, 1.2, 0);
+        st.prevGray.delete();
+        st.prevGray = gray.clone();
+        const parts = s.t(new cv.MatVector());
+        cv.split(flow, parts);
+        const fx = s.t(parts.get(0)), fy = s.t(parts.get(1));
+        const mag = s.t(new cv.Mat()), ang = s.t(new cv.Mat());
+        cv.cartToPolar(fx, fy, mag, ang, true);
+        const hsv = s.t(new cv.Mat(H, W, cv.CV_8UC3));
+        const hd = hsv.data, magd = mag.data32F, angd = ang.data32F;
+        const amp = num(p.amp, 4);
+        for (let i = 0; i < W * H; i++) {
+          const m = magd[i];
+          // Noise floor suppresses static-area flicker; above it, amplify so even
+          // modest motion lights up clearly (hue = direction, value = speed).
+          hd[i * 3] = Math.round(angd[i] / 2) % 180;
+          hd[i * 3 + 1] = 255;
+          hd[i * 3 + 2] = m < 0.35 ? 0 : Math.min(255, m * amp * 40);
+        }
+        const rgbSmall = s.t(new cv.Mat());
+        cv.cvtColor(hsv, rgbSmall, cv.COLOR_HSV2RGB);
+        const out = new cv.Mat();
+        cv.resize(rgbSmall, out, new cv.Size(src.cols, src.rows), 0, 0, cv.INTER_LINEAR);
+        return { output: out, info: [{ label: '色', value: '色相=向き / 明度=速さ' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'meanshift-camshift': {
+    defaultSample: 'scene',
+    input: 'video',
+    params: [
+      {
+        id: 'mode',
+        label: '手法',
+        type: 'select',
+        default: 'camshift',
+        options: [
+          { label: 'CamShift (回転・拡縮対応)', value: 'camshift' },
+          { label: 'MeanShift', value: 'meanshift' },
+        ],
+      },
+    ],
+    run: (cv, src, p, extras) => {
+      const s = new Scope();
+      try {
+        const st = extras?.state ?? {};
+        const rgb = s.t(toRGB(cv, src));
+        const hsv = s.t(new cv.Mat());
+        cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+        if (extras?.firstFrame || !st.hist || !st.win) {
+          const w = Math.round(src.cols * 0.3), h = Math.round(src.rows * 0.3);
+          st.win = [Math.round((src.cols - w) / 2), Math.round((src.rows - h) / 2), w, h];
+          const roi = s.t(hsv.roi(new cv.Rect(st.win[0], st.win[1], w, h)));
+          const roiVec = s.t(new cv.MatVector());
+          roiVec.push_back(roi);
+          const emptyMask = s.t(new cv.Mat());
+          st.hist?.delete?.();
+          const hist = new cv.Mat();
+          cv.calcHist(roiVec, [0], emptyMask, hist, [16], [0, 180], false);
+          cv.normalize(hist, hist, 0, 255, cv.NORM_MINMAX);
+          st.hist = hist;
+        }
+        const hsvVec = s.t(new cv.MatVector());
+        hsvVec.push_back(hsv);
+        const bp = s.t(new cv.Mat());
+        cv.calcBackProject(hsvVec, [0], st.hist, bp, [0, 180], 1);
+        const tcEps = cv.TermCriteria_EPS ?? cv.TERM_CRITERIA_EPS ?? 2;
+        const tcCount = cv.TermCriteria_COUNT ?? cv.TermCriteria_MAX_ITER ?? cv.TERM_CRITERIA_COUNT ?? 1;
+        const crit = s.t(new cv.TermCriteria(tcEps + tcCount, 10, 1));
+        let win = new cv.Rect(st.win[0], st.win[1], st.win[2], st.win[3]);
+        const out = rgb.clone();
+        // opencv.js returns [retval/rotatedRect, updatedWindow] from these.
+        if (str(p.mode, 'camshift') === 'meanshift') {
+          const ret = cv.meanShift(bp, win, crit);
+          if (Array.isArray(ret) && ret[1]) win = ret[1];
+          cv.rectangle(out, new cv.Point(win.x, win.y), new cv.Point(win.x + win.width, win.y + win.height), ACCENT2(cv), 3);
+        } else {
+          const ret = cv.CamShift(bp, win, crit);
+          const rr = Array.isArray(ret) ? ret[0] : ret;
+          if (Array.isArray(ret) && ret[1]) win = ret[1];
+          if (rr && rr.center) {
+            const pts = rotatedRectPoints(rr);
+            for (let j = 0; j < 4; j++) {
+              cv.line(out, new cv.Point(pts[j].x, pts[j].y), new cv.Point(pts[(j + 1) % 4].x, pts[(j + 1) % 4].y), ACCENT(cv), 3);
+            }
+          } else {
+            cv.rectangle(out, new cv.Point(win.x, win.y), new cv.Point(win.x + win.width, win.y + win.height), ACCENT2(cv), 3);
+          }
+        }
+        st.win = [win.x, win.y, win.width, win.height];
+        return { output: out, info: [{ label: '追跡窓', value: `${win.width}×${win.height}` }] };
       } finally {
         s.done();
       }

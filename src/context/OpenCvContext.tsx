@@ -15,7 +15,13 @@ interface OpenCvState {
   error: string | null;
   ensureLoaded: () => void;
   retry: () => void;
-  process: (demoId: string, image: CvImage, params: Record<string, any>, imageB?: CvImage) => Promise<ProcessResult>;
+  process: (
+    demoId: string,
+    image: CvImage,
+    params: Record<string, any>,
+    imageB?: CvImage,
+    opts?: { stream?: boolean; reset?: boolean },
+  ) => Promise<ProcessResult>;
 }
 
 const Ctx = createContext<OpenCvState>({

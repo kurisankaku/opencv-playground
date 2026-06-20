@@ -8,6 +8,7 @@ import { CompareView } from './CompareView';
 import { HistogramChart } from './HistogramChart';
 import { SpatialView } from './SpatialView';
 import { TwoImageView } from './TwoImageView';
+import { VideoView } from './VideoView';
 import { ImageSource } from './ImageSource';
 import { ParamPanel } from './ParamPanel';
 import { InfoTable } from './InfoTable';
@@ -45,6 +46,10 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
   const isChart = impl.output === 'chart';
   const spatialParam = impl.params.find((p) => p.type === 'points' || p.type === 'rect');
   const isTwo = !!impl.secondSample;
+  const isVideo = impl.input === 'video';
+
+  const [streaming, setStreaming] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
 
   // Second input image (B) for two-image demos.
   const [sampleIdB, setSampleIdB] = useState(impl.secondSample ?? 'shapes');
@@ -58,6 +63,87 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
   const bRef = useRef<HTMLCanvasElement>(null);
   const token = useRef(0);
   const dims = useRef({ w: source.width, h: source.height });
+
+  // --- video (webcam) streaming ---
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const rafRef = useRef(0);
+  const inFlight = useRef(false);
+  const resetNext = useRef(true);
+  const grabRef = useRef<HTMLCanvasElement | null>(null);
+  const paramsRef = useRef(params);
+  useEffect(() => { paramsRef.current = params; }, [params]);
+
+  const stopCamera = () => {
+    cancelAnimationFrame(rafRef.current);
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setStreaming(false);
+  };
+
+  const frameLoop = () => {
+    rafRef.current = requestAnimationFrame(frameLoop);
+    const v = videoRef.current;
+    if (!v || v.readyState < 2 || inFlight.current) return;
+    if (!grabRef.current) grabRef.current = document.createElement('canvas');
+    const gc = grabRef.current;
+    const w = 480;
+    const h = Math.max(1, Math.round((v.videoHeight / v.videoWidth) * w)) || 360;
+    gc.width = w;
+    gc.height = h;
+    const gctx = gc.getContext('2d');
+    if (!gctx) return;
+    gctx.drawImage(v, 0, 0, w, h);
+    const img = gctx.getImageData(0, 0, w, h);
+    inFlight.current = true;
+    const reset = resetNext.current;
+    resetNext.current = false;
+    setBusy(true);
+    process(demoId, { data: img.data, width: w, height: h }, paramsRef.current, undefined, { stream: true, reset })
+      .then((res) => {
+        const out = afterRef.current;
+        if (res.image && out) {
+          out.width = res.image.width;
+          out.height = res.image.height;
+          const octx = out.getContext('2d');
+          if (octx) {
+            const id = octx.createImageData(res.image.width, res.image.height);
+            id.data.set(res.image.data);
+            octx.putImageData(id, 0, 0);
+          }
+        }
+        setInfo(res.info);
+        setRunError(null);
+      })
+      .catch((e: Error) => setRunError(e.message))
+      .finally(() => {
+        inFlight.current = false;
+        setBusy(false);
+      });
+  };
+
+  const startCamera = async () => {
+    setCameraError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      const v = videoRef.current;
+      if (!v) return;
+      v.srcObject = stream;
+      await v.play();
+      resetNext.current = true;
+      setStreaming(true);
+      rafRef.current = requestAnimationFrame(frameLoop);
+    } catch (e: any) {
+      setCameraError('カメラにアクセスできませんでした（' + (e?.message ?? e) + '）。');
+    }
+  };
+
+  // Stop the camera when leaving the demo / unmounting.
+  useEffect(() => () => stopCamera(), [demoId]);
 
   // Draw image B into its thumbnail canvas.
   useEffect(() => {
@@ -92,7 +178,9 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
   }, [source, impl]);
 
   // Send the image to the worker (debounced) whenever source or params change.
+  // Video demos are driven by the frame loop instead, so skip this path.
   useEffect(() => {
+    if (isVideo) return;
     const myToken = ++token.current;
     setBusy(true);
     const handle = setTimeout(() => {
@@ -133,7 +221,7 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
         });
     }, 80);
     return () => clearTimeout(handle);
-  }, [source, sourceB, params, demoId, process, isTwo]);
+  }, [source, sourceB, params, demoId, process, isTwo, isVideo]);
 
   const aspect = source.width / source.height;
 
@@ -168,7 +256,18 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
           </div>
         )}
 
-        {isTwo ? (
+        {isVideo ? (
+          <VideoView
+            videoRef={videoRef}
+            outRef={afterRef}
+            streaming={streaming}
+            cameraError={cameraError}
+            onStart={startCamera}
+            onStop={stopCamera}
+            aspect={4 / 3}
+            busy={busy}
+          />
+        ) : isTwo ? (
           <TwoImageView
             aRef={beforeRef}
             bRef={bRef}
@@ -223,20 +322,22 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
           onReset={() => setParams(initParams(impl, source.width, source.height))}
         />
         <InfoTable items={info} />
-        <ImageSource
-          title={isTwo ? '入力画像 A' : '入力画像'}
-          activeSampleId={sampleId}
-          uploaded={uploaded}
-          onPickSample={(id) => {
-            setUploaded(false);
-            setSampleId(id);
-            setSource(renderSample(id));
-          }}
-          onUpload={(canvas) => {
-            setUploaded(true);
-            setSource(canvas);
-          }}
-        />
+        {!isVideo && (
+          <ImageSource
+            title={isTwo ? '入力画像 A' : '入力画像'}
+            activeSampleId={sampleId}
+            uploaded={uploaded}
+            onPickSample={(id) => {
+              setUploaded(false);
+              setSampleId(id);
+              setSource(renderSample(id));
+            }}
+            onUpload={(canvas) => {
+              setUploaded(true);
+              setSource(canvas);
+            }}
+          />
+        )}
         {isTwo && (
           <ImageSource
             title="入力画像 B"

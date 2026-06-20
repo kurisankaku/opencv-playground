@@ -32,6 +32,21 @@ const FETCH_TIMEOUT_MS = 45000;
 
 let loadPromise: Promise<{ cv: any }> | null = null;
 
+// Persistent state for the active video demo (background model, previous frame,
+// tracked points, …). Survives across streamed frames; freed on demo switch/reset.
+let videoStore: { demoId: string; store: Record<string, any> } | null = null;
+function disposeVideoStore() {
+  if (!videoStore) return;
+  for (const v of Object.values(videoStore.store)) {
+    try {
+      (v as any)?.delete?.();
+    } catch {
+      /* not a deletable cv object */
+    }
+  }
+  videoStore = null;
+}
+
 function isCv(o: any): boolean {
   return !!o && typeof o.Mat === 'function';
 }
@@ -156,12 +171,14 @@ ctx.onmessage = async (e: MessageEvent) => {
   }
 
   if (msg.type === 'process') {
-    const { reqId, demoId, params, image, imageB } = msg as {
+    const { reqId, demoId, params, image, imageB, stream, reset } = msg as {
       reqId: number;
       demoId: string;
       params: Record<string, any>;
       image: CvImage;
       imageB?: CvImage;
+      stream?: boolean;
+      reset?: boolean;
     };
     let src: any;
     let srcB: any;
@@ -179,7 +196,18 @@ ctx.onmessage = async (e: MessageEvent) => {
         srcB.data.set(imageB.data);
       }
 
-      result = impl.run(cv, src, params, { srcB });
+      // Stateful video streaming: keep a persistent per-demo store across frames.
+      let extras: any = { srcB };
+      if (stream) {
+        const isNew = !videoStore || videoStore.demoId !== demoId || !!reset;
+        if (isNew) {
+          disposeVideoStore();
+          videoStore = { demoId, store: {} };
+        }
+        extras = { srcB, state: videoStore!.store, firstFrame: isNew };
+      }
+
+      result = impl.run(cv, src, params, extras);
       const msg: any = { type: 'result', reqId, info: result.info ?? [] };
       const transfer: Transferable[] = [];
       if (result.output) {

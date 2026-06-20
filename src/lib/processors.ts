@@ -2900,6 +2900,110 @@ export const impls: Record<string, DemoImpl> = {
       }
     },
   },
+
+  'sift-features': {
+    defaultSample: 'noisy',
+    // SIFT is not compiled into this opencv.js build — AKAZE is a scale/rotation-
+    // invariant alternative that IS available, so we use it (and say so).
+    params: [{ id: 'thresh', label: '検出感度 (小さいほど多い)', type: 'slider', min: 0.0005, max: 0.008, step: 0.0005, default: 0.002 }],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const gray = s.t(toGray(cv, src));
+        const akaze = s.t(new cv.AKAZE());
+        akaze.setThreshold?.(num(p.thresh, 0.002));
+        const kp = s.t(new cv.KeyPointVector());
+        const des = s.t(new cv.Mat());
+        const mask = s.t(new cv.Mat());
+        akaze.detectAndCompute(gray, mask, kp, des);
+        const out = src.clone();
+        const nk = kp.size();
+        for (let i = 0; i < nk; i++) {
+          const k = kp.get(i);
+          const r = Math.max(3, Math.round(k.size / 2));
+          cv.circle(out, new cv.Point(k.pt.x, k.pt.y), r, ACCENT(cv), 1);
+          const a = (k.angle * Math.PI) / 180;
+          cv.line(out, new cv.Point(k.pt.x, k.pt.y),
+            new cv.Point(k.pt.x + r * Math.cos(a), k.pt.y + r * Math.sin(a)), ACCENT2(cv), 1);
+        }
+        return {
+          output: out,
+          info: [
+            { label: '特徴点数', value: `${nk}` },
+            { label: '手法', value: 'AKAZE (SIFT非搭載のため代替)' },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'panorama-stitching': {
+    defaultSample: 'scene',
+    // Stitcher is absent from opencv.js — build the panorama by hand with
+    // ORB → BFMatcher → findHomography → warpPerspective. To guarantee a working
+    // default we synthesize two overlapping views (left half + a tilted right half).
+    params: [{ id: 'angle', label: '右画像の傾き (°)', type: 'slider', min: -15, max: 15, step: 1, default: 8 }],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const rgb = s.t(toRGB(cv, src));
+        const W = rgb.cols, H = rgb.rows;
+        const leftW = Math.round(W * 0.62);
+        const rightX = Math.round(W * 0.38), rightW = W - rightX;
+        const left = s.t(rgb.roi(new cv.Rect(0, 0, leftW, H)).clone());
+        const rightRaw = s.t(rgb.roi(new cv.Rect(rightX, 0, rightW, H)).clone());
+        // Tilt the right view so the homography has real work to do.
+        const right = s.t(new cv.Mat());
+        const Mr = s.t(cv.getRotationMatrix2D(new cv.Point(rightW / 2, H / 2), num(p.angle, 8), 1));
+        cv.warpAffine(rightRaw, right, Mr, new cv.Size(rightW, H), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(13, 16, 24));
+        const gL = s.t(new cv.Mat()); cv.cvtColor(left, gL, cv.COLOR_RGB2GRAY);
+        const gR = s.t(new cv.Mat()); cv.cvtColor(right, gR, cv.COLOR_RGB2GRAY);
+        const A = orbDetect(cv, gL, s, 800);
+        const B = orbDetect(cv, gR, s, 800);
+        const top = bfMatchTopN(cv, B.des, A.des, s, 150, true); // right(query) → left(train)
+        const srcArr: number[] = [], dstArr: number[] = [];
+        for (const m of top) {
+          const pb = B.pts[m.q], pa = A.pts[m.t];
+          if (!pb || !pa) continue;
+          srcArr.push(pb[0], pb[1]);
+          dstArr.push(pa[0], pa[1]);
+        }
+        const nPts = srcArr.length / 2;
+        const panoW = leftW + rightW;
+        const out = new cv.Mat(H, panoW, cv.CV_8UC3, new cv.Scalar(13, 16, 24));
+        let inliers = 0;
+        if (nPts >= 4) {
+          const srcM = s.t(cv.matFromArray(nPts, 1, cv.CV_32FC2, srcArr));
+          const dstM = s.t(cv.matFromArray(nPts, 1, cv.CV_32FC2, dstArr));
+          const mask = s.t(new cv.Mat());
+          const Hm = s.t(cv.findHomography(srcM, dstM, cv.RANSAC, 5, mask));
+          if (Hm && !Hm.empty()) {
+            const warped = s.t(new cv.Mat());
+            cv.warpPerspective(right, warped, Hm, new cv.Size(panoW, H), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(13, 16, 24));
+            warped.copyTo(s.t(out.roi(new cv.Rect(0, 0, panoW, H))));
+            left.copyTo(s.t(out.roi(new cv.Rect(0, 0, leftW, H)))); // left on top of the seam
+            inliers = cv.countNonZero(mask);
+            cv.line(out, new cv.Point(leftW, 0), new cv.Point(leftW, H), new cv.Scalar(124, 92, 255), 1);
+            return {
+              output: out,
+              info: [
+                { label: 'マッチ数', value: `${top.length}` },
+                { label: 'インライア', value: `${inliers}` },
+                { label: '合成幅', value: `${W}px → ${panoW}px` },
+              ],
+            };
+          }
+        }
+        left.copyTo(s.t(out.roi(new cv.Rect(0, 0, leftW, H))));
+        right.copyTo(s.t(out.roi(new cv.Rect(leftW, 0, Math.min(rightW, panoW - leftW), H))));
+        return { output: out, info: [{ label: '結果', value: 'マッチ不足で単純連結' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
 };
 
 /** Build a morphology demo impl (erosion/dilation/opening/closing). */

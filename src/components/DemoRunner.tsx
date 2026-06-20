@@ -77,8 +77,10 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
   const aspect = source.width / source.height;
 
   return (
-    <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
-      <div className="space-y-4">
+    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_350px]">
+      {/* Preview — pinned to the top so it stays visible while adjusting params
+          (height-capped on mobile/tablet; normal sticky column on desktop). */}
+      <div className="sticky top-14 z-20 self-start space-y-3 border-b border-line/60 bg-ink pb-3 lg:top-[4.75rem] lg:border-0 lg:bg-transparent lg:pb-0">
         {status === 'loading' && (
           <div className="flex items-center gap-2 rounded-lg border border-[#f5a524]/30 bg-[#f5a524]/5 px-4 py-2.5 text-sm text-[#f5a524]">
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -105,11 +107,23 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
           </div>
         )}
 
-        <CompareView beforeRef={beforeRef} afterRef={afterRef} aspect={aspect} busy={busy} />
-        <InfoTable items={info} />
+        <CompareView
+          beforeRef={beforeRef}
+          afterRef={afterRef}
+          aspect={aspect}
+          busy={busy}
+          className="max-h-[44vh] lg:max-h-none"
+        />
       </div>
 
       <div className="space-y-4">
+        <ParamPanel
+          params={impl.params}
+          values={params}
+          onChange={(id, value) => setParams((prev) => ({ ...prev, [id]: value }))}
+          onReset={() => setParams(defaults(impl))}
+        />
+        <InfoTable items={info} />
         <ImageSource
           activeSampleId={sampleId}
           uploaded={uploaded}
@@ -122,12 +136,6 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
             setUploaded(true);
             setSource(canvas);
           }}
-        />
-        <ParamPanel
-          params={impl.params}
-          values={params}
-          onChange={(id, value) => setParams((prev) => ({ ...prev, [id]: value }))}
-          onReset={() => setParams(defaults(impl))}
         />
       </div>
     </div>

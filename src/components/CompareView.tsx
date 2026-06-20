@@ -10,11 +10,13 @@ export function CompareView({
   afterRef,
   aspect,
   busy = false,
+  className = '',
 }: {
   beforeRef: RefObject<HTMLCanvasElement>;
   afterRef: RefObject<HTMLCanvasElement>;
   aspect: number;
   busy?: boolean;
+  className?: string;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const [split, setSplit] = useState(50);
@@ -31,7 +33,8 @@ export function CompareView({
   return (
     <div
       ref={container}
-      className="relative w-full select-none overflow-hidden rounded-xl border border-line bg-[#06070b]"
+      data-testid="compare"
+      className={`relative w-full select-none overflow-hidden rounded-xl border border-line bg-[#06070b] ${className}`}
       style={{ aspectRatio: String(aspect || 4 / 3), touchAction: 'none' }}
       onPointerDown={(e) => {
         dragging.current = true;

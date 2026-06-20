@@ -76,18 +76,39 @@ export const impls: Record<string, DemoImpl> = {
       },
     ],
     run: (cv, src, p) => {
-      const scale = num(p.scale, 0.4);
-      const map: Record<string, number> = {
-        nearest: cv.INTER_NEAREST,
-        linear: cv.INTER_LINEAR,
-        area: cv.INTER_AREA,
-        cubic: cv.INTER_CUBIC,
-      };
-      const out = new cv.Mat();
-      const w = Math.max(1, Math.round(src.cols * scale));
-      const h = Math.max(1, Math.round(src.rows * scale));
-      cv.resize(src, out, new cv.Size(w, h), 0, 0, map[str(p.interp, 'area')]);
-      return { output: out, info: [{ label: '出力サイズ', value: `${w} × ${h} px` }] };
+      const s = new Scope();
+      try {
+        const scale = num(p.scale, 0.4);
+        const map: Record<string, number> = {
+          nearest: cv.INTER_NEAREST,
+          linear: cv.INTER_LINEAR,
+          area: cv.INTER_AREA,
+          cubic: cv.INTER_CUBIC,
+        };
+        const w = Math.max(1, Math.round(src.cols * scale));
+        const h = Math.max(1, Math.round(src.rows * scale));
+        const resized = s.t(new cv.Mat());
+        cv.resize(src, resized, new cv.Size(w, h), 0, 0, map[str(p.interp, 'area')]);
+        // Composite onto a source-sized frame so the size change is actually
+        // visible (otherwise the display normalizes every output to fill the box).
+        const frame = new cv.Mat(src.rows, src.cols, src.type(), new cv.Scalar(13, 16, 24, 255));
+        const offX = Math.round((src.cols - w) / 2);
+        const offY = Math.round((src.rows - h) / 2);
+        const fx = Math.max(0, offX);
+        const fy = Math.max(0, offY);
+        const rx = Math.max(0, -offX);
+        const ry = Math.max(0, -offY);
+        const cw = Math.min(w - rx, src.cols - fx);
+        const ch = Math.min(h - ry, src.rows - fy);
+        if (cw > 0 && ch > 0) {
+          const sRoi = s.t(resized.roi(new cv.Rect(rx, ry, cw, ch)));
+          const dRoi = s.t(frame.roi(new cv.Rect(fx, fy, cw, ch)));
+          sRoi.copyTo(dRoi);
+        }
+        return { output: frame, info: [{ label: '出力サイズ', value: `${w} × ${h} px` }] };
+      } finally {
+        s.done();
+      }
     },
   },
 
@@ -326,7 +347,7 @@ export const impls: Record<string, DemoImpl> = {
   },
 
   'bilateral-filter': {
-    defaultSample: 'scene',
+    defaultSample: 'noisy',
     params: [
       { id: 'd', label: '直径 (d)', type: 'slider', min: 1, max: 21, step: 2, default: 9 },
       { id: 'sc', label: '色 σ', type: 'slider', min: 1, max: 200, step: 1, default: 75 },
@@ -456,7 +477,7 @@ export const impls: Record<string, DemoImpl> = {
 
   // ---------------- edge-gradient ----------------
   'canny-edge-detection': {
-    defaultSample: 'shapes',
+    defaultSample: 'coins',
     params: [
       { id: 't1', label: '下限しきい値', type: 'slider', min: 0, max: 255, step: 1, default: 50 },
       { id: 't2', label: '上限しきい値', type: 'slider', min: 0, max: 255, step: 1, default: 150 },
@@ -549,7 +570,7 @@ export const impls: Record<string, DemoImpl> = {
   // ---------------- contours-shape ----------------
   'find-contours': {
     defaultSample: 'shapes',
-    params: [{ id: 'minArea', label: '最小面積', type: 'slider', min: 0, max: 5000, step: 50, default: 200 }],
+    params: [{ id: 'minArea', label: '最小面積', type: 'slider', min: 0, max: 30000, step: 500, default: 200 }],
     run: (cv, src, p) => {
       const s = new Scope();
       try {
@@ -575,7 +596,7 @@ export const impls: Record<string, DemoImpl> = {
 
   'bounding-rect': {
     defaultSample: 'shapes',
-    params: [{ id: 'minArea', label: '最小面積', type: 'slider', min: 0, max: 5000, step: 50, default: 200 }],
+    params: [{ id: 'minArea', label: '最小面積', type: 'slider', min: 0, max: 30000, step: 500, default: 200 }],
     run: (cv, src, p) => {
       const s = new Scope();
       try {
@@ -603,7 +624,7 @@ export const impls: Record<string, DemoImpl> = {
 
   'contour-area': {
     defaultSample: 'shapes',
-    params: [{ id: 'minArea', label: '最小面積', type: 'slider', min: 0, max: 5000, step: 50, default: 200 }],
+    params: [{ id: 'minArea', label: '最小面積', type: 'slider', min: 0, max: 30000, step: 500, default: 200 }],
     run: (cv, src, p) => {
       const s = new Scope();
       try {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Loader2 } from 'lucide-react';
+import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react';
 import { useOpenCv } from '../context/OpenCvContext';
 import type { DemoImpl, InfoItem } from '../lib/processors';
 import { renderSample } from '../lib/sampleImages';
@@ -14,8 +14,8 @@ function defaults(impl: DemoImpl): Record<string, any> {
   return o;
 }
 
-export function DemoRunner({ impl }: { impl: DemoImpl }) {
-  const { cv, status, error: cvError } = useOpenCv();
+export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl }) {
+  const { status, error: cvError, retry, process } = useOpenCv();
 
   const [sampleId, setSampleId] = useState(impl.defaultSample);
   const [uploaded, setUploaded] = useState(false);
@@ -27,6 +27,7 @@ export function DemoRunner({ impl }: { impl: DemoImpl }) {
 
   const beforeRef = useRef<HTMLCanvasElement>(null);
   const afterRef = useRef<HTMLCanvasElement>(null);
+  const token = useRef(0);
 
   // Draw the source into both canvases (after = baseline until processed).
   useEffect(() => {
@@ -39,29 +40,39 @@ export function DemoRunner({ impl }: { impl: DemoImpl }) {
     }
   }, [source]);
 
-  // Run the processor (debounced) whenever cv, source, or params change.
+  // Send the image to the worker (debounced) whenever source or params change.
   useEffect(() => {
-    if (!cv) return;
+    const myToken = ++token.current;
     setBusy(true);
     const handle = setTimeout(() => {
-      let src: any;
-      let result: any;
-      try {
-        src = cv.imread(source);
-        result = impl.run(cv, src, params);
-        if (afterRef.current) cv.imshow(afterRef.current, result.output);
-        setInfo(result.info ?? []);
-        setRunError(null);
-      } catch (e: any) {
-        setRunError(e?.message ? String(e.message) : '処理中にエラーが発生しました。');
-      } finally {
-        result?.output?.delete?.();
-        src?.delete?.();
-        setBusy(false);
-      }
-    }, 60);
+      const sctx = source.getContext('2d');
+      if (!sctx) return;
+      const img = sctx.getImageData(0, 0, source.width, source.height);
+      process(demoId, { data: img.data, width: img.width, height: img.height }, params)
+        .then((res) => {
+          if (myToken !== token.current) return; // a newer request superseded this one
+          const after = afterRef.current;
+          if (!after) return;
+          after.width = res.image.width;
+          after.height = res.image.height;
+          const actx = after.getContext('2d');
+          if (actx) {
+            const out = actx.createImageData(res.image.width, res.image.height);
+            out.data.set(res.image.data);
+            actx.putImageData(out, 0, 0);
+          }
+          setInfo(res.info);
+          setRunError(null);
+        })
+        .catch((e: Error) => {
+          if (myToken === token.current) setRunError(e.message);
+        })
+        .finally(() => {
+          if (myToken === token.current) setBusy(false);
+        });
+    }, 80);
     return () => clearTimeout(handle);
-  }, [cv, source, params, impl]);
+  }, [source, params, demoId, process]);
 
   const aspect = source.width / source.height;
 
@@ -71,16 +82,23 @@ export function DemoRunner({ impl }: { impl: DemoImpl }) {
         {status === 'loading' && (
           <div className="flex items-center gap-2 rounded-lg border border-[#f5a524]/30 bg-[#f5a524]/5 px-4 py-2.5 text-sm text-[#f5a524]">
             <Loader2 className="h-4 w-4 animate-spin" />
-            OpenCV.js (WebAssembly) を読み込んでいます… 初回は数秒かかります。
+            OpenCV.js (WebAssembly · 約10MB) をバックグラウンドで読み込み中… 画面は操作できます。初回は十数秒かかることがあります。
           </div>
         )}
         {status === 'error' && (
-          <div className="flex items-center gap-2 rounded-lg border border-[#ff4d6d]/30 bg-[#ff4d6d]/5 px-4 py-2.5 text-sm text-[#ff4d6d]">
-            <AlertTriangle className="h-4 w-4" />
-            {cvError ?? 'OpenCV.js の読み込みに失敗しました。'}
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[#ff4d6d]/30 bg-[#ff4d6d]/5 px-4 py-2.5 text-sm text-[#ff4d6d]">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span className="flex-1">{cvError ?? 'OpenCV.js の読み込みに失敗しました。'}</span>
+            <button
+              onClick={retry}
+              className="inline-flex items-center gap-1.5 rounded-md border border-[#ff4d6d]/40 px-2.5 py-1 text-xs font-medium transition-colors hover:bg-[#ff4d6d]/10"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              再読み込み
+            </button>
           </div>
         )}
-        {runError && (
+        {runError && status !== 'error' && (
           <div className="flex items-center gap-2 rounded-lg border border-[#ff4d6d]/30 bg-[#ff4d6d]/5 px-4 py-2.5 text-sm text-[#ff4d6d]">
             <AlertTriangle className="h-4 w-4" />
             {runError}

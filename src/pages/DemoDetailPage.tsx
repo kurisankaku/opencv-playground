@@ -50,7 +50,7 @@ export function DemoDetailPage() {
       {/* Interactive area */}
       <div className="mt-8">
         {impl ? (
-          <DemoRunner key={demo.id} impl={impl} />
+          <DemoRunner key={demo.id} demoId={demo.id} impl={impl} />
         ) : (
           <div className="panel flex flex-col items-center gap-2 p-12 text-center">
             <Clock className="h-7 w-7 text-[#f5a524]" />

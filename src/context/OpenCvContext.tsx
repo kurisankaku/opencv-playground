@@ -1,51 +1,54 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { loadOpenCV } from '../lib/loadOpenCV';
-import type { Cv } from '../types/opencv';
-
-export type CvStatus = 'idle' | 'loading' | 'ready' | 'error';
+import {
+  ensureLoaded as clientEnsureLoaded,
+  getStatus,
+  processImage,
+  retry as clientRetry,
+  subscribe,
+  type CvStatus,
+  type ProcessResult,
+  type CvImage,
+} from '../lib/cvClient';
 
 interface OpenCvState {
-  cv: Cv | null;
   status: CvStatus;
   error: string | null;
-  /** Trigger the (lazy) load. Safe to call repeatedly. */
   ensureLoaded: () => void;
+  retry: () => void;
+  process: (demoId: string, image: CvImage, params: Record<string, any>) => Promise<ProcessResult>;
 }
 
 const Ctx = createContext<OpenCvState>({
-  cv: null,
   status: 'idle',
   error: null,
-  ensureLoaded: () => {},
+  ensureLoaded: clientEnsureLoaded,
+  retry: clientRetry,
+  process: processImage,
 });
 
 export function OpenCvProvider({ children, autoLoad = true }: { children: ReactNode; autoLoad?: boolean }) {
-  const [cv, setCv] = useState<Cv | null>(null);
-  const [status, setStatus] = useState<CvStatus>('idle');
-  const [error, setError] = useState<string | null>(null);
-
-  const ensureLoaded = () => {
-    setStatus((prev) => {
-      if (prev === 'loading' || prev === 'ready') return prev;
-      loadOpenCV()
-        .then((loaded) => {
-          setCv(loaded);
-          setStatus('ready');
-        })
-        .catch((e: Error) => {
-          setError(e.message);
-          setStatus('error');
-        });
-      return 'loading';
-    });
-  };
+  const [{ status, error }, setState] = useState(() => getStatus());
 
   useEffect(() => {
-    if (autoLoad) ensureLoaded();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const unsub = subscribe((status, error) => setState({ status, error }));
+    setState(getStatus()); // resync in case status changed before we subscribed
+    if (autoLoad) clientEnsureLoaded();
+    return unsub;
   }, [autoLoad]);
 
-  return <Ctx.Provider value={{ cv, status, error, ensureLoaded }}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider
+      value={{
+        status,
+        error,
+        ensureLoaded: clientEnsureLoaded,
+        retry: clientRetry,
+        process: processImage,
+      }}
+    >
+      {children}
+    </Ctx.Provider>
+  );
 }
 
 export function useOpenCv() {

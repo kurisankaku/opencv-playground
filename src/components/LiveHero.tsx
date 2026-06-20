@@ -5,13 +5,14 @@ import { CompareView } from './CompareView';
 
 /**
  * Home hero: a live Canny edge-detection transform — the single most
- * characteristic OpenCV operation, running in real time as the page loads.
+ * characteristic OpenCV operation, running in the worker as the page loads.
  */
 export function LiveHero() {
-  const { cv } = useOpenCv();
+  const { status, process } = useOpenCv();
   const [sensitivity, setSensitivity] = useState(55);
   const beforeRef = useRef<HTMLCanvasElement>(null);
   const afterRef = useRef<HTMLCanvasElement>(null);
+  const token = useRef(0);
   const source = renderSample('scene');
 
   useEffect(() => {
@@ -25,32 +26,41 @@ export function LiveHero() {
   }, [source]);
 
   useEffect(() => {
-    if (!cv) return;
+    const myToken = ++token.current;
     const t = setTimeout(() => {
-      let src, gray, edges;
-      try {
-        src = cv.imread(source);
-        gray = new cv.Mat();
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-        cv.GaussianBlur(gray, gray, new cv.Size(3, 3), 0);
-        edges = new cv.Mat();
-        const t1 = (100 - sensitivity) * 1.4 + 8;
-        cv.Canny(gray, edges, t1, t1 * 2.4, 3, false);
-        if (afterRef.current) cv.imshow(afterRef.current, edges);
-      } catch {
-        /* ignore */
-      } finally {
-        edges?.delete();
-        gray?.delete();
-        src?.delete();
-      }
-    }, 40);
+      const sctx = source.getContext('2d');
+      if (!sctx) return;
+      const img = sctx.getImageData(0, 0, source.width, source.height);
+      const t1 = (100 - sensitivity) * 1.4 + 8;
+      process('canny-edge-detection', { data: img.data, width: img.width, height: img.height }, { t1, t2: t1 * 2.4 })
+        .then((res) => {
+          if (myToken !== token.current) return;
+          const after = afterRef.current;
+          if (!after) return;
+          after.width = res.image.width;
+          after.height = res.image.height;
+          const actx = after.getContext('2d');
+          if (actx) {
+            const out = actx.createImageData(res.image.width, res.image.height);
+            out.data.set(res.image.data);
+            actx.putImageData(out, 0, 0);
+          }
+        })
+        .catch(() => {
+          /* hero is decorative; ignore failures */
+        });
+    }, 60);
     return () => clearTimeout(t);
-  }, [cv, sensitivity, source]);
+  }, [sensitivity, source, process]);
 
   return (
     <div className="panel overflow-hidden p-3">
-      <CompareView beforeRef={beforeRef} afterRef={afterRef} aspect={source.width / source.height} />
+      <CompareView
+        beforeRef={beforeRef}
+        afterRef={afterRef}
+        aspect={source.width / source.height}
+        busy={status === 'loading'}
+      />
       <div className="mt-3 px-1">
         <div className="mb-1.5 flex items-baseline justify-between">
           <label className="eyebrow">エッジ感度 · Canny</label>

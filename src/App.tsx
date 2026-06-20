@@ -13,9 +13,14 @@ function ScrollToTop() {
   return null;
 }
 
+// Isolation switch: add `nocv` anywhere in the URL (e.g. /#/?nocv) to stop
+// OpenCV.js from auto-loading. If the UI is responsive with `nocv` but frozen
+// without it, OpenCV/WASM loading is the cause; if frozen either way, it isn't.
+const noCv = typeof window !== 'undefined' && window.location.href.includes('nocv');
+
 export default function App() {
   return (
-    <OpenCvProvider>
+    <OpenCvProvider autoLoad={!noCv}>
       <HashRouter>
         <ScrollToTop />
         <Layout>

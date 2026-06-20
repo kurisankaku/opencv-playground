@@ -7,4 +7,7 @@ import tailwindcss from '@tailwindcss/vite';
 export default defineConfig({
   base: './',
   plugins: [react(), tailwindcss()],
+  // ES module workers. The OpenCV.js worker loads opencv.js via fetch+eval
+  // (not importScripts), so a standard module worker works in dev and build.
+  worker: { format: 'es' },
 });

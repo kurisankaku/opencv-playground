@@ -2646,6 +2646,260 @@ export const impls: Record<string, DemoImpl> = {
       }
     },
   },
+
+  // ---------------- misc (bitwise / kernels / contours / ML / photo) ----------------
+  'bitwise-operations': {
+    defaultSample: 'scene',
+    params: [
+      {
+        id: 'op',
+        label: '演算',
+        type: 'select',
+        default: 'and',
+        options: [
+          { label: 'AND (積)', value: 'and' },
+          { label: 'OR (和)', value: 'or' },
+          { label: 'XOR (排他)', value: 'xor' },
+          { label: 'NOT (反転)', value: 'not' },
+        ],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const rgb = s.t(toRGB(cv, src));
+        const op = str(p.op, 'and');
+        const out = new cv.Mat();
+        if (op === 'not') {
+          cv.bitwise_not(rgb, out);
+          return { output: out, info: [{ label: '演算', value: 'NOT (色反転)' }] };
+        }
+        // operand = two overlapping white shapes (a mask pattern)
+        const pat = s.t(new cv.Mat(rgb.rows, rgb.cols, cv.CV_8UC3, new cv.Scalar(0, 0, 0)));
+        cv.circle(pat, new cv.Point(rgb.cols * 0.38, rgb.rows * 0.5),
+          Math.min(rgb.rows, rgb.cols) * 0.32, new cv.Scalar(255, 255, 255), -1);
+        cv.rectangle(pat, new cv.Point(rgb.cols * 0.5, rgb.rows * 0.28),
+          new cv.Point(rgb.cols * 0.82, rgb.rows * 0.72), new cv.Scalar(255, 255, 255), -1);
+        if (op === 'or') cv.bitwise_or(rgb, pat, out);
+        else if (op === 'xor') cv.bitwise_xor(rgb, pat, out);
+        else cv.bitwise_and(rgb, pat, out);
+        return { output: out, info: [{ label: '演算', value: `画像 ${op.toUpperCase()} 白形状` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'draw-contours': {
+    defaultSample: 'shapes',
+    params: [
+      { id: 'thickness', label: '線の太さ (-1で塗りつぶし)', type: 'slider', min: -1, max: 8, step: 1, default: 3 },
+      {
+        id: 'which',
+        label: '描画対象',
+        type: 'select',
+        default: 'all',
+        options: [
+          { label: 'すべての輪郭', value: 'all' },
+          { label: '最大の輪郭のみ', value: 'largest' },
+        ],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const { contours } = externalContours(cv, src, s);
+        const out = src.clone();
+        const th = Math.round(num(p.thickness, 3));
+        if (str(p.which, 'all') === 'largest') {
+          let bi = -1, ba = 0;
+          for (let i = 0; i < contours.size(); i++) {
+            const a = cv.contourArea(contours.get(i));
+            if (a > ba) { ba = a; bi = i; }
+          }
+          if (bi >= 0) cv.drawContours(out, contours, bi, ACCENT(cv), th);
+        } else {
+          for (let i = 0; i < contours.size(); i++) cv.drawContours(out, contours, i, ACCENT(cv), th);
+        }
+        return { output: out, info: [{ label: '輪郭数', value: `${contours.size()}` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'custom-kernel-filter2d': {
+    defaultSample: 'scene',
+    params: [
+      {
+        id: 'kernel',
+        label: 'カーネル (3×3)',
+        type: 'select',
+        default: 'sharpen',
+        options: [
+          { label: 'シャープ化', value: 'sharpen' },
+          { label: 'エッジ検出', value: 'edge' },
+          { label: 'エンボス', value: 'emboss' },
+          { label: '平均ぼかし', value: 'box' },
+          { label: '輪郭強調', value: 'outline' },
+        ],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const kernels: Record<string, number[]> = {
+          sharpen: [0, -1, 0, -1, 5, -1, 0, -1, 0],
+          edge: [-1, -1, -1, -1, 8, -1, -1, -1, -1],
+          emboss: [-2, -1, 0, -1, 1, 1, 0, 1, 2],
+          box: Array(9).fill(1 / 9),
+          outline: [-1, -1, -1, -1, 9, -1, -1, -1, -1],
+        };
+        const k = s.t(cv.matFromArray(3, 3, cv.CV_32F, kernels[str(p.kernel, 'sharpen')] ?? kernels.sharpen));
+        const rgb = s.t(toRGB(cv, src));
+        const out = new cv.Mat();
+        cv.filter2D(rgb, out, -1, k);
+        return { output: out };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'kmeans-clustering': {
+    defaultSample: 'scene',
+    params: [{ id: 'k', label: 'クラスタ数 K', type: 'slider', min: 2, max: 10, step: 1, default: 3 }],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const W = src.cols, H = src.rows;
+        // Deterministic 2D point cloud arranged in 5 blobs (seeded LCG for stability).
+        let seed = 987654321;
+        const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+        const blobs = [[0.25, 0.3], [0.7, 0.25], [0.5, 0.55], [0.3, 0.78], [0.78, 0.72]];
+        const N = 250;
+        const xy: number[] = [];
+        for (let i = 0; i < N; i++) {
+          const c = blobs[i % blobs.length];
+          xy.push((c[0] + (rnd() - 0.5) * 0.18) * W, (c[1] + (rnd() - 0.5) * 0.18) * H);
+        }
+        const samples = s.t(cv.matFromArray(N, 2, cv.CV_32F, xy));
+        const K = Math.round(num(p.k, 3));
+        const labels = s.t(new cv.Mat(N, 1, cv.CV_32S));
+        const centers = s.t(new cv.Mat());
+        const TC_EPS = cv.TermCriteria_EPS ?? cv.TERM_CRITERIA_EPS ?? 2;
+        const TC_ITER = cv.TermCriteria_MAX_ITER ?? cv.TermCriteria_COUNT ?? 1;
+        const crit = new cv.TermCriteria(TC_EPS + TC_ITER, 10, 1);
+        cv.kmeans(samples, K, labels, crit, 5, cv.KMEANS_PP_CENTERS, centers);
+        const out = new cv.Mat(H, W, cv.CV_8UC3, new cv.Scalar(15, 18, 26));
+        for (let i = 0; i < N; i++) {
+          const c = LABEL_COLORS[labels.intAt(i, 0) % LABEL_COLORS.length];
+          cv.circle(out, new cv.Point(xy[i * 2], xy[i * 2 + 1]), 5, new cv.Scalar(c[0], c[1], c[2]), -1);
+        }
+        for (let j = 0; j < K; j++) {
+          const cx = centers.data32F[j * 2], cy = centers.data32F[j * 2 + 1];
+          cv.line(out, new cv.Point(cx - 13, cy - 13), new cv.Point(cx + 13, cy + 13), new cv.Scalar(255, 255, 255), 3);
+          cv.line(out, new cv.Point(cx - 13, cy + 13), new cv.Point(cx + 13, cy - 13), new cv.Scalar(255, 255, 255), 3);
+        }
+        return { output: out, info: [{ label: 'データ点', value: `${N}` }, { label: 'クラスタ数', value: `${K}` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'inpainting': {
+    defaultSample: 'scene',
+    params: [
+      { id: 'rect', label: '消す領域', type: 'rect', default: [0.6, 0.12, 0.28, 0.28] },
+      { id: 'radius', label: '補完半径', type: 'slider', min: 1, max: 15, step: 1, default: 3 },
+      {
+        id: 'method',
+        label: '手法',
+        type: 'select',
+        default: 'telea',
+        options: [
+          { label: 'TELEA', value: 'telea' },
+          { label: 'Navier-Stokes', value: 'ns' },
+        ],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const rgb = s.t(toRGB(cv, src));
+        const [x, y, w, h] = clampRect(p.rect, src.cols, src.rows);
+        const mask = s.t(new cv.Mat(src.rows, src.cols, cv.CV_8UC1, new cv.Scalar(0)));
+        cv.rectangle(mask, new cv.Point(x, y), new cv.Point(x + w, y + h), new cv.Scalar(255), -1);
+        const out = new cv.Mat();
+        const flag = str(p.method, 'telea') === 'ns' ? cv.INPAINT_NS : cv.INPAINT_TELEA;
+        cv.inpaint(rgb, mask, out, num(p.radius, 3), flag);
+        return { output: out, info: [{ label: '消した領域', value: `${w} × ${h} px` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'stylization-filters': {
+    defaultSample: 'scene',
+    params: [
+      {
+        id: 'effect',
+        label: '効果',
+        type: 'select',
+        default: 'pencil',
+        options: [
+          { label: '鉛筆画', value: 'pencil' },
+          { label: 'カートゥーン', value: 'cartoon' },
+          { label: 'エッジ保持平滑', value: 'smooth' },
+        ],
+      },
+    ],
+    // photo モジュール(stylization等)は opencv.js 標準ビルド未収録のため imgproc で近似。
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const rgb = s.t(toRGB(cv, src));
+        const effect = str(p.effect, 'pencil');
+        if (effect === 'smooth') {
+          const out = new cv.Mat();
+          cv.bilateralFilter(rgb, out, 15, 80, 80, cv.BORDER_DEFAULT);
+          return { output: out };
+        }
+        if (effect === 'cartoon') {
+          const smooth = s.t(new cv.Mat());
+          cv.bilateralFilter(rgb, smooth, 11, 90, 90, cv.BORDER_DEFAULT);
+          const gray = s.t(new cv.Mat());
+          cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
+          const edges = s.t(new cv.Mat());
+          cv.adaptiveThreshold(gray, edges, 255, cv.ADAPTIVE_THRESH_MEAN_C, cv.THRESH_BINARY, 9, 7);
+          const edges3 = s.t(new cv.Mat());
+          cv.cvtColor(edges, edges3, cv.COLOR_GRAY2RGB);
+          const out = new cv.Mat();
+          cv.bitwise_and(smooth, edges3, out);
+          return { output: out };
+        }
+        // pencil sketch: gray → invert → blur → colour-dodge
+        const gray = s.t(new cv.Mat());
+        cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
+        const inv = s.t(new cv.Mat());
+        cv.bitwise_not(gray, inv);
+        const blur = s.t(new cv.Mat());
+        cv.GaussianBlur(inv, blur, new cv.Size(21, 21), 0);
+        const out = new cv.Mat(gray.rows, gray.cols, cv.CV_8UC1);
+        const gd = gray.data, bd = blur.data, od = out.data;
+        const n = gray.rows * gray.cols;
+        for (let i = 0; i < n; i++) {
+          const denom = 255 - bd[i];
+          od[i] = denom <= 0 ? 255 : Math.min(255, Math.round((gd[i] * 255) / denom));
+        }
+        return { output: out };
+      } finally {
+        s.done();
+      }
+    },
+  },
 };
 
 /** Build a morphology demo impl (erosion/dilation/opening/closing). */

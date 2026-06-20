@@ -3004,6 +3004,1348 @@ export const impls: Record<string, DemoImpl> = {
       }
     },
   },
+
+  // ================= 組み合わせレシピ (multi-step pipelines) =================
+  // Each recipe exposes a "stage" select so the intermediate result of the
+  // pipeline can be viewed step by step.
+
+  'recipe-line-enhance': {
+    defaultSample: 'document',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① グレースケール', value: 'gray' },
+          { label: '② 適応的二値化', value: 'thresh' },
+          { label: '③ モルフォロジー閉 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'block', label: '適応ブロックサイズ', type: 'slider', min: 3, max: 51, step: 2, default: 15 },
+      { id: 'C', label: '定数 C', type: 'slider', min: -20, max: 20, step: 1, default: 8 },
+      { id: 'k', label: 'モルフォロジー カーネル', type: 'slider', min: 1, max: 9, step: 2, default: 3 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        if (stage === 'gray') return { output: gray.clone(), info: [{ label: 'ステップ', value: '① グレースケール化' }] };
+        const th = s.t(new cv.Mat());
+        cv.adaptiveThreshold(gray, th, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, odd(num(p.block, 15)), num(p.C, 8));
+        if (stage === 'thresh') return { output: th.clone(), info: [{ label: 'ステップ', value: '② 適応的二値化(局所しきい値)' }] };
+        const M = s.t(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(odd(num(p.k, 3)), odd(num(p.k, 3)))));
+        const out = new cv.Mat();
+        cv.morphologyEx(th, out, cv.MORPH_CLOSE, M);
+        return { output: out, info: [{ label: 'パイプライン', value: 'gray → 適応的二値化 → 閉処理' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-clean-binarize': {
+    defaultSample: 'noisy',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① グレースケール', value: 'gray' },
+          { label: '② ガウシアンぼかし', value: 'blur' },
+          { label: '③ Otsu 二値化 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'k', label: 'ぼかしカーネル', type: 'slider', min: 1, max: 15, step: 2, default: 5 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        if (stage === 'gray') return { output: gray.clone(), info: [{ label: 'ステップ', value: '① グレースケール化' }] };
+        const blur = s.t(new cv.Mat());
+        const k = odd(num(p.k, 5));
+        cv.GaussianBlur(gray, blur, new cv.Size(k, k), 0);
+        if (stage === 'blur') return { output: blur.clone(), info: [{ label: 'ステップ', value: `② ガウシアンぼかし ${k}×${k}` }] };
+        const out = new cv.Mat();
+        const t = cv.threshold(blur, out, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: 'gray → ぼかし → Otsu' },
+            { label: '自動しきい値', value: `${Math.round(t)}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-color-segment': {
+    defaultSample: 'colored-objects',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① HSV inRange マスク', value: 'mask' },
+          { label: '② モルフォロジー清掃', value: 'clean' },
+          { label: '③ マスク適用 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'hLow', label: '色相 下限', type: 'slider', min: 0, max: 179, step: 1, default: 35 },
+      { id: 'hHigh', label: '色相 上限', type: 'slider', min: 0, max: 179, step: 1, default: 85 },
+      { id: 'sMin', label: '彩度 下限', type: 'slider', min: 0, max: 255, step: 5, default: 70 },
+      { id: 'k', label: '清掃カーネル', type: 'slider', min: 1, max: 15, step: 2, default: 5 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        const hsv = s.t(new cv.Mat());
+        cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+        const low = s.t(new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [num(p.hLow, 35), num(p.sMin, 70), 40, 0]));
+        const high = s.t(new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [num(p.hHigh, 85), 255, 255, 255]));
+        const mask = s.t(new cv.Mat());
+        cv.inRange(hsv, low, high, mask);
+        if (stage === 'mask') return { output: mask.clone(), info: [{ label: 'ステップ', value: '① HSV inRange マスク' }] };
+        const M = s.t(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(odd(num(p.k, 5)), odd(num(p.k, 5)))));
+        const clean = s.t(new cv.Mat());
+        cv.morphologyEx(mask, clean, cv.MORPH_OPEN, M);
+        cv.morphologyEx(clean, clean, cv.MORPH_CLOSE, M);
+        if (stage === 'clean') return { output: clean.clone(), info: [{ label: 'ステップ', value: '② 開→閉でマスク清掃' }] };
+        const out = new cv.Mat();
+        cv.bitwise_and(rgb, rgb, out, clean);
+        const hit = cv.countNonZero(clean);
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: 'HSV → inRange → 清掃 → bitwise_and' },
+            { label: '抽出画素', value: `${((hit / (mask.rows * mask.cols)) * 100).toFixed(1)} %` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-blob-count': {
+    defaultSample: 'coins',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① Otsu 二値化', value: 'binary' },
+          { label: '② モルフォロジー開', value: 'opened' },
+          { label: '③ 輪郭+カウント (完成)', value: 'final' },
+        ],
+      },
+      { id: 'k', label: '開処理カーネル', type: 'slider', min: 1, max: 15, step: 2, default: 5 },
+      { id: 'minArea', label: '最小面積', type: 'slider', min: 0, max: 20000, step: 200, default: 800 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const bin = s.t(new cv.Mat());
+        // coins are bright on dark → THRESH_BINARY; works for both via Otsu.
+        cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+        if (stage === 'binary') return { output: bin.clone(), info: [{ label: 'ステップ', value: '① Otsu 二値化' }] };
+        const M = s.t(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(odd(num(p.k, 5)), odd(num(p.k, 5)))));
+        const opened = s.t(new cv.Mat());
+        cv.morphologyEx(bin, opened, cv.MORPH_OPEN, M);
+        if (stage === 'opened') return { output: opened.clone(), info: [{ label: 'ステップ', value: '② 開処理でノイズ除去' }] };
+        const contours = s.t(new cv.MatVector());
+        const hier = s.t(new cv.Mat());
+        cv.findContours(opened, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        const out = src.clone();
+        let count = 0;
+        for (let i = 0; i < contours.size(); i++) {
+          if (cv.contourArea(contours.get(i)) < num(p.minArea, 800)) continue;
+          cv.drawContours(out, contours, i, ACCENT(cv), 3);
+          const r = cv.boundingRect(contours.get(i));
+          cv.putText(out, `${++count}`, new cv.Point(r.x + r.width / 2 - 8, r.y + r.height / 2 + 8),
+            cv.FONT_HERSHEY_SIMPLEX, 0.9, ACCENT2(cv), 2);
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: 'Otsu → 開 → 輪郭 → 面積フィルタ' },
+            { label: '検出個数', value: `${count}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-shape-classify': {
+    defaultSample: 'shapes',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 二値化', value: 'binary' },
+          { label: '② 輪郭抽出', value: 'contours' },
+          { label: '③ 多角形近似+分類 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'epsilon', label: '近似精度 (周囲長比)', type: 'slider', min: 0.01, max: 0.08, step: 0.005, default: 0.03 },
+      { id: 'minArea', label: '最小面積', type: 'slider', min: 0, max: 30000, step: 500, default: 1500 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const bin = s.t(new cv.Mat());
+        cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+        if (stage === 'binary') return { output: bin.clone(), info: [{ label: 'ステップ', value: '① 反転Otsu二値化' }] };
+        const contours = s.t(new cv.MatVector());
+        const hier = s.t(new cv.Mat());
+        cv.findContours(bin, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        if (stage === 'contours') {
+          const o = src.clone();
+          for (let i = 0; i < contours.size(); i++) {
+            if (cv.contourArea(contours.get(i)) < num(p.minArea, 1500)) continue;
+            cv.drawContours(o, contours, i, ACCENT(cv), 2);
+          }
+          return { output: o, info: [{ label: 'ステップ', value: '② 輪郭抽出' }] };
+        }
+        const out = src.clone();
+        let n = 0;
+        for (let i = 0; i < contours.size(); i++) {
+          const c = contours.get(i);
+          if (cv.contourArea(c) < num(p.minArea, 1500)) continue;
+          const peri = cv.arcLength(c, true);
+          const approx = s.t(new cv.Mat());
+          cv.approxPolyDP(c, approx, num(p.epsilon, 0.03) * peri, true);
+          const v = approx.rows;
+          // putText (Hershey font) is ASCII-only, so the on-image label uses
+          // romanized names; the Japanese names live in the guide/info.
+          const name = v === 3 ? 'Tri' : v === 4 ? 'Quad' : v === 5 ? 'Penta' : v <= 6 ? 'Hexa' : 'Circle';
+          const mv = s.t(new cv.MatVector());
+          mv.push_back(approx);
+          cv.drawContours(out, mv, 0, ACCENT(cv), 3);
+          const r = cv.boundingRect(c);
+          cv.putText(out, `${name}(${v})`, new cv.Point(r.x, Math.max(18, r.y - 8)),
+            cv.FONT_HERSHEY_SIMPLEX, 0.6, ACCENT2(cv), 2);
+          n++;
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: '二値化 → 輪郭 → approxPolyDP → 頂点数で分類' },
+            { label: '分類した図形', value: `${n}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-line-detect': {
+    defaultSample: 'lines',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① Canny エッジ', value: 'edges' },
+          { label: '② Hough直線 (完成)', value: 'final' },
+        ],
+      },
+      { id: 't1', label: 'Canny 下限', type: 'slider', min: 0, max: 255, step: 1, default: 50 },
+      { id: 't2', label: 'Canny 上限', type: 'slider', min: 0, max: 255, step: 1, default: 150 },
+      { id: 'thresh', label: 'Hough 投票しきい値', type: 'slider', min: 1, max: 200, step: 1, default: 60 },
+      { id: 'minLen', label: '最小線長', type: 'slider', min: 0, max: 400, step: 5, default: 60 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const blur = s.t(new cv.Mat());
+        cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+        const edges = s.t(new cv.Mat());
+        cv.Canny(blur, edges, num(p.t1, 50), num(p.t2, 150), 3, false);
+        if (stage === 'edges') return { output: edges.clone(), info: [{ label: 'ステップ', value: '① ぼかし→Canny エッジ' }] };
+        const lines = s.t(new cv.Mat());
+        cv.HoughLinesP(edges, lines, 1, Math.PI / 180, num(p.thresh, 60), num(p.minLen, 60), 10);
+        const out = src.clone();
+        for (let i = 0; i < lines.rows; i++) {
+          const x1 = lines.data32S[i * 4], y1 = lines.data32S[i * 4 + 1];
+          const x2 = lines.data32S[i * 4 + 2], y2 = lines.data32S[i * 4 + 3];
+          cv.line(out, new cv.Point(x1, y1), new cv.Point(x2, y2), ACCENT(cv), 3);
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: 'gray → ぼかし → Canny → HoughLinesP' },
+            { label: '検出直線数', value: `${lines.rows}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-clahe-enhance': {
+    defaultSample: 'low-contrast',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 元画像', value: 'original' },
+          { label: '② L成分にCLAHE', value: 'lchan' },
+          { label: '③ カラー合成 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'clip', label: 'クリップ上限', type: 'slider', min: 1, max: 10, step: 0.5, default: 3 },
+      { id: 'tiles', label: 'タイル分割数', type: 'slider', min: 2, max: 16, step: 1, default: 8 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        if (stage === 'original') return { output: rgb.clone(), info: [{ label: 'ステップ', value: '① 元画像' }] };
+        const lab = s.t(new cv.Mat());
+        cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab);
+        const ch = s.t(new cv.MatVector());
+        cv.split(lab, ch);
+        const L = s.t(ch.get(0)), A = s.t(ch.get(1)), B = s.t(ch.get(2));
+        const tiles = Math.round(num(p.tiles, 8));
+        const clahe = s.t(new cv.CLAHE(num(p.clip, 3), new cv.Size(tiles, tiles)));
+        const L2 = s.t(new cv.Mat());
+        clahe.apply(L, L2);
+        if (stage === 'lchan') return { output: L2.clone(), info: [{ label: 'ステップ', value: '② 明度(L)にCLAHE' }] };
+        const merged = s.t(new cv.MatVector());
+        merged.push_back(L2); merged.push_back(A); merged.push_back(B);
+        const lab2 = s.t(new cv.Mat());
+        cv.merge(merged, lab2);
+        const out = new cv.Mat();
+        cv.cvtColor(lab2, out, cv.COLOR_Lab2RGB);
+        return { output: out, info: [{ label: 'パイプライン', value: 'Lab分解 → L にCLAHE → 合成' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-unsharp-mask': {
+    defaultSample: 'document',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① ぼかし(マスク)', value: 'blur' },
+          { label: '② シャープ化 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'k', label: 'ぼかし半径', type: 'slider', min: 1, max: 21, step: 2, default: 7 },
+      { id: 'amount', label: '強さ', type: 'slider', min: 0, max: 3, step: 0.1, default: 1 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        const blur = s.t(new cv.Mat());
+        const k = odd(num(p.k, 7));
+        cv.GaussianBlur(rgb, blur, new cv.Size(k, k), 0);
+        if (stage === 'blur') return { output: blur.clone(), info: [{ label: 'ステップ', value: '① ぼかし画像(マスク)' }] };
+        const a = num(p.amount, 1);
+        const out = new cv.Mat();
+        cv.addWeighted(rgb, 1 + a, blur, -a, 0, out);
+        return { output: out, info: [{ label: 'パイプライン', value: 'src*(1+a) − blur*a' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-skeletonize': {
+    defaultSample: 'shapes',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 二値化', value: 'binary' },
+          { label: '② スケルトン (完成)', value: 'final' },
+        ],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const bin = s.t(new cv.Mat());
+        cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+        if (stage === 'binary') return { output: bin.clone(), info: [{ label: 'ステップ', value: '① 反転Otsu二値化' }] };
+        // Morphological skeleton: accumulate (work − open(work)) while eroding.
+        const skel = new cv.Mat(bin.rows, bin.cols, cv.CV_8UC1, new cv.Scalar(0));
+        const work = s.t(bin.clone());
+        const temp = s.t(new cv.Mat());
+        const eroded = s.t(new cv.Mat());
+        const M = s.t(cv.getStructuringElement(cv.MORPH_CROSS, new cv.Size(3, 3)));
+        let iter = 0;
+        while (iter++ < 200) {
+          cv.morphologyEx(work, temp, cv.MORPH_OPEN, M);
+          cv.subtract(work, temp, temp);
+          cv.bitwise_or(skel, temp, skel);
+          cv.erode(work, eroded, M);
+          eroded.copyTo(work);
+          if (cv.countNonZero(work) === 0) break;
+        }
+        return { output: skel, info: [{ label: 'パイプライン', value: '二値化 → 反復(開差分+収縮)で細線化' }, { label: '反復回数', value: `${iter}` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-distance-centers': {
+    defaultSample: 'coins',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 二値化', value: 'binary' },
+          { label: '② 距離変換', value: 'dist' },
+          { label: '③ 中心抽出 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'ratio', label: 'ピークしきい値 (最大値比)', type: 'slider', min: 0.3, max: 0.9, step: 0.05, default: 0.55 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const bin = s.t(new cv.Mat());
+        cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+        if (stage === 'binary') return { output: bin.clone(), info: [{ label: 'ステップ', value: '① Otsu二値化' }] };
+        const dist = s.t(new cv.Mat());
+        cv.distanceTransform(bin, dist, cv.DIST_L2, 5);
+        const dist8 = s.t(new cv.Mat());
+        const norm = s.t(new cv.Mat());
+        cv.normalize(dist, norm, 0, 255, cv.NORM_MINMAX);
+        norm.convertTo(dist8, cv.CV_8U);
+        if (stage === 'dist') return { output: dist8.clone(), info: [{ label: 'ステップ', value: '② 距離変換(物体中心ほど明るい)' }] };
+        const mm = cv.minMaxLoc(dist);
+        const peaks = s.t(new cv.Mat());
+        cv.threshold(dist, peaks, num(p.ratio, 0.55) * mm.maxVal, 255, cv.THRESH_BINARY);
+        const peaks8 = s.t(new cv.Mat());
+        peaks.convertTo(peaks8, cv.CV_8U);
+        const labels = s.t(new cv.Mat());
+        const stats = s.t(new cv.Mat());
+        const cent = s.t(new cv.Mat());
+        const n = cv.connectedComponentsWithStats(peaks8, labels, stats, cent, 8, cv.CV_32S);
+        const out = src.clone();
+        for (let i = 1; i < n; i++) {
+          const cx = cent.data64F[i * 2], cy = cent.data64F[i * 2 + 1];
+          cv.circle(out, new cv.Point(cx, cy), 9, ACCENT(cv), -1);
+          cv.circle(out, new cv.Point(cx, cy), 9, ACCENT2(cv), 2);
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: '二値化 → 距離変換 → ピーク → 重心' },
+            { label: '検出中心数', value: `${n - 1}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-ocr-preprocess': {
+    defaultSample: 'document',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① エッジ保持平滑', value: 'bilateral' },
+          { label: '② 適応的二値化 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'block', label: '適応ブロックサイズ', type: 'slider', min: 3, max: 51, step: 2, default: 21 },
+      { id: 'C', label: '定数 C', type: 'slider', min: -20, max: 20, step: 1, default: 10 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        const smooth = s.t(new cv.Mat());
+        cv.bilateralFilter(rgb, smooth, 9, 75, 75, cv.BORDER_DEFAULT);
+        if (stage === 'bilateral') return { output: smooth.clone(), info: [{ label: 'ステップ', value: '① bilateral(エッジ保持平滑)' }] };
+        const gray = s.t(new cv.Mat());
+        cv.cvtColor(smooth, gray, cv.COLOR_RGB2GRAY);
+        const out = new cv.Mat();
+        cv.adaptiveThreshold(gray, out, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, odd(num(p.block, 21)), num(p.C, 10));
+        return { output: out, info: [{ label: 'パイプライン', value: 'bilateral → gray → 適応的二値化' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-edge-overlay': {
+    defaultSample: 'scene',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① Cannyエッジ', value: 'edges' },
+          { label: '② 元画像へ合成 (完成)', value: 'final' },
+        ],
+      },
+      { id: 't1', label: 'Canny 下限', type: 'slider', min: 0, max: 255, step: 1, default: 50 },
+      { id: 't2', label: 'Canny 上限', type: 'slider', min: 0, max: 255, step: 1, default: 150 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        const gray = s.t(toGray(cv, src));
+        const edges = s.t(new cv.Mat());
+        cv.Canny(gray, edges, num(p.t1, 50), num(p.t2, 150), 3, false);
+        if (stage === 'edges') return { output: edges.clone(), info: [{ label: 'ステップ', value: '① Cannyエッジ' }] };
+        const dil = s.t(new cv.Mat());
+        const M = s.t(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(2, 2)));
+        cv.dilate(edges, dil, M);
+        const out = rgb.clone();
+        const od = out.data, ed = dil.data;
+        const n = rgb.rows * rgb.cols;
+        for (let i = 0; i < n; i++) {
+          if (ed[i]) { od[i * 3] = 124; od[i * 3 + 1] = 92; od[i * 3 + 2] = 255; }
+        }
+        return { output: out, info: [{ label: 'パイプライン', value: 'Canny → dilate → 元画像へ色合成' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-coin-circles': {
+    defaultSample: 'coins',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① メディアンぼかし', value: 'blur' },
+          { label: '② Hough円検出 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'minDist', label: '中心間最小距離', type: 'slider', min: 10, max: 200, step: 1, default: 50 },
+      { id: 'param2', label: '検出しきい値', type: 'slider', min: 10, max: 150, step: 1, default: 45 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        cv.medianBlur(gray, gray, 5);
+        if (stage === 'blur') return { output: gray.clone(), info: [{ label: 'ステップ', value: '① メディアンぼかしで偽円を抑制' }] };
+        const circles = s.t(new cv.Mat());
+        cv.HoughCircles(gray, circles, cv.HOUGH_GRADIENT, 1, num(p.minDist, 50), 100, num(p.param2, 45), 0, 0);
+        const out = src.clone();
+        for (let i = 0; i < circles.cols; i++) {
+          const x = circles.data32F[i * 3], y = circles.data32F[i * 3 + 1], r = circles.data32F[i * 3 + 2];
+          cv.circle(out, new cv.Point(x, y), r, ACCENT2(cv), 3);
+          cv.putText(out, `${i + 1}`, new cv.Point(x - 8, y + 8), cv.FONT_HERSHEY_SIMPLEX, 0.9, ACCENT(cv), 2);
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: 'gray → medianBlur → HoughCircles' },
+            { label: '検出個数', value: `${circles.cols}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-watershed-separate': {
+    defaultSample: 'coins',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① Otsu二値化', value: 'binary' },
+          { label: '② 距離変換', value: 'dist' },
+          { label: '③ 確実な前景', value: 'fg' },
+          { label: '④ Watershed境界 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'fg', label: '前景しきい値', type: 'slider', min: 0.2, max: 0.9, step: 0.05, default: 0.5 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        const gray = s.t(toGray(cv, src));
+        const bin = s.t(new cv.Mat());
+        cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+        const M = s.t(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3)));
+        const opening = s.t(new cv.Mat());
+        cv.morphologyEx(bin, opening, cv.MORPH_OPEN, M, new cv.Point(-1, -1), 2);
+        if (stage === 'binary') return { output: opening.clone(), info: [{ label: 'ステップ', value: '① Otsu二値化+開処理' }] };
+        const sureBg = s.t(new cv.Mat());
+        cv.dilate(opening, sureBg, M, new cv.Point(-1, -1), 3);
+        const dist = s.t(new cv.Mat());
+        cv.distanceTransform(opening, dist, cv.DIST_L2, 5);
+        if (stage === 'dist') {
+          const d8 = s.t(new cv.Mat());
+          const dn = s.t(new cv.Mat());
+          cv.normalize(dist, dn, 0, 255, cv.NORM_MINMAX);
+          dn.convertTo(d8, cv.CV_8U);
+          return { output: d8.clone(), info: [{ label: 'ステップ', value: '② 距離変換(中心ほど明るい)' }] };
+        }
+        const dm = cv.minMaxLoc(dist);
+        const sureFg = s.t(new cv.Mat());
+        cv.threshold(dist, sureFg, num(p.fg, 0.5) * dm.maxVal, 255, cv.THRESH_BINARY);
+        const sureFg8 = s.t(new cv.Mat());
+        sureFg.convertTo(sureFg8, cv.CV_8U);
+        if (stage === 'fg') return { output: sureFg8.clone(), info: [{ label: 'ステップ', value: '③ 距離ピーク=確実な前景(マーカー)' }] };
+        const unknown = s.t(new cv.Mat());
+        cv.subtract(sureBg, sureFg8, unknown);
+        const markers = s.t(new cv.Mat());
+        const ncc = cv.connectedComponents(sureFg8, markers);
+        const one = s.t(new cv.Mat(markers.rows, markers.cols, markers.type(), new cv.Scalar(1)));
+        cv.add(markers, one, markers);
+        const n = markers.rows * markers.cols;
+        const md = markers.data32S, ud = unknown.data;
+        for (let i = 0; i < n; i++) if (ud[i] > 0) md[i] = 0;
+        cv.watershed(rgb, markers);
+        const out = src.clone();
+        const od = out.data;
+        for (let i = 0; i < n; i++) {
+          if (md[i] === -1) { od[i * 4] = 255; od[i * 4 + 1] = 64; od[i * 4 + 2] = 64; }
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: '二値化→距離変換→マーカー→watershed' },
+            { label: '分離した領域数', value: `${Math.max(0, ncc - 1)}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-color-replace': {
+    defaultSample: 'colored-objects',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 色マスク', value: 'mask' },
+          { label: '② 色置換 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'hLow', label: '対象色相 下限', type: 'slider', min: 0, max: 179, step: 1, default: 0 },
+      { id: 'hHigh', label: '対象色相 上限', type: 'slider', min: 0, max: 179, step: 1, default: 12 },
+      { id: 'shift', label: '色相シフト量', type: 'slider', min: 0, max: 179, step: 1, default: 90 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        const hsv = s.t(new cv.Mat());
+        cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+        const low = s.t(new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [num(p.hLow, 0), 80, 50, 0]));
+        const high = s.t(new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [num(p.hHigh, 12), 255, 255, 255]));
+        const mask = s.t(new cv.Mat());
+        cv.inRange(hsv, low, high, mask);
+        if (stage === 'mask') return { output: mask.clone(), info: [{ label: 'ステップ', value: '① 置換対象の色マスク' }] };
+        const ch = s.t(new cv.MatVector());
+        cv.split(hsv, ch);
+        const H = s.t(ch.get(0)), S = s.t(ch.get(1)), V = s.t(ch.get(2));
+        const hd = H.data, md = mask.data, shift = Math.round(num(p.shift, 90));
+        for (let i = 0; i < hd.length; i++) if (md[i]) hd[i] = (hd[i] + shift) % 180;
+        const merged = s.t(new cv.MatVector());
+        merged.push_back(H); merged.push_back(S); merged.push_back(V);
+        const hsv2 = s.t(new cv.Mat());
+        cv.merge(merged, hsv2);
+        const out = new cv.Mat();
+        cv.cvtColor(hsv2, out, cv.COLOR_HSV2RGB);
+        return { output: out, info: [{ label: 'パイプライン', value: 'HSV → マスク内のHをシフト → RGB' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-background-flatten': {
+    defaultSample: 'document',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 推定背景', value: 'bg' },
+          { label: '② ムラ補正 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'k', label: '背景推定カーネル', type: 'slider', min: 11, max: 81, step: 2, default: 41 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const k = odd(num(p.k, 41));
+        const M = s.t(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(k, k)));
+        // Large opening estimates the (bright) background, removing dark text.
+        const bg = s.t(new cv.Mat());
+        cv.morphologyEx(gray, bg, cv.MORPH_OPEN, M);
+        if (stage === 'bg') return { output: bg.clone(), info: [{ label: 'ステップ', value: '① 大カーネル開処理=背景の明るさ分布' }] };
+        // Divide normalizes each pixel by its local background → flat illumination.
+        const out = new cv.Mat();
+        cv.divide(gray, bg, out, 255);
+        return { output: out, info: [{ label: 'パイプライン', value: 'gray ÷ 推定背景 × 255' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-text-region': {
+    defaultSample: 'document',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 暗部の二値化', value: 'grad' },
+          { label: '② 横連結', value: 'closed' },
+          { label: '③ テキスト領域 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'closeW', label: '連結カーネル幅', type: 'slider', min: 3, max: 51, step: 2, default: 21 },
+      { id: 'minArea', label: '最小領域面積', type: 'slider', min: 0, max: 8000, step: 100, default: 600 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        // Text/dark marks → white. (THRESH_BINARY_INV: dark text becomes foreground.)
+        const bin = s.t(new cv.Mat());
+        cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+        if (stage === 'grad') return { output: bin.clone(), info: [{ label: 'ステップ', value: '① 暗部(文字)を白く二値化' }] };
+        // Wide horizontal close merges characters/marks into text-line blocks.
+        const M = s.t(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(odd(num(p.closeW, 21)), 3)));
+        const closed = s.t(new cv.Mat());
+        cv.morphologyEx(bin, closed, cv.MORPH_CLOSE, M);
+        if (stage === 'closed') return { output: closed.clone(), info: [{ label: 'ステップ', value: '② 横長カーネルで行に連結' }] };
+        const contours = s.t(new cv.MatVector());
+        const hier = s.t(new cv.Mat());
+        cv.findContours(closed, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        const out = src.clone();
+        const imgArea = src.rows * src.cols;
+        let count = 0;
+        for (let i = 0; i < contours.size(); i++) {
+          const r = cv.boundingRect(contours.get(i));
+          const a = r.width * r.height;
+          // wide & not the whole-frame background region
+          if (a < num(p.minArea, 600) || a > imgArea * 0.35 || r.width < r.height * 1.3) continue;
+          cv.rectangle(out, new cv.Point(r.x, r.y), new cv.Point(r.x + r.width, r.y + r.height), ACCENT2(cv), 2);
+          count++;
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: '二値化 → 横連結 → 外接矩形' },
+            { label: 'テキスト領域数', value: `${count}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-contour-measure': {
+    defaultSample: 'shapes',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 二値化', value: 'binary' },
+          { label: '② 形状計測 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'minArea', label: '最小面積', type: 'slider', min: 0, max: 30000, step: 500, default: 1500 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const bin = s.t(new cv.Mat());
+        cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+        if (stage === 'binary') return { output: bin.clone(), info: [{ label: 'ステップ', value: '① 反転Otsu二値化' }] };
+        const contours = s.t(new cv.MatVector());
+        const hier = s.t(new cv.Mat());
+        cv.findContours(bin, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        const out = src.clone();
+        let n = 0;
+        const GREEN = new cv.Scalar(52, 224, 161, 255);
+        const ORANGE = new cv.Scalar(245, 165, 36, 255);
+        for (let i = 0; i < contours.size(); i++) {
+          const c = contours.get(i);
+          const area = cv.contourArea(c);
+          if (area < num(p.minArea, 1500)) continue;
+          const peri = cv.arcLength(c, true);
+          const circ = peri > 0 ? (4 * Math.PI * area) / (peri * peri) : 0; // 1=完全な円
+          const isRound = circ > 0.82;
+          cv.drawContours(out, contours, i, isRound ? GREEN : ORANGE, 3);
+          const r = cv.boundingRect(c);
+          cv.putText(out, `${circ.toFixed(2)}`, new cv.Point(r.x, Math.max(18, r.y - 6)),
+            cv.FONT_HERSHEY_SIMPLEX, 0.6, ACCENT2(cv), 2);
+          n++;
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: '二値化 → 輪郭 → 円形度 4πA/L²' },
+            { label: '計測した図形', value: `${n}` },
+            { label: '色分け', value: '緑=円形 / 橙=多角形' },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-roi-mosaic': {
+    defaultSample: 'scene',
+    params: [
+      { id: 'rect', label: '対象領域', type: 'rect', default: [0.32, 0.28, 0.4, 0.4] },
+      { id: 'block', label: 'モザイクの粗さ', type: 'slider', min: 4, max: 40, step: 2, default: 16 },
+      {
+        id: 'mode', label: '処理', type: 'select', default: 'mosaic',
+        options: [
+          { label: 'モザイク', value: 'mosaic' },
+          { label: 'ぼかし', value: 'blur' },
+          { label: '黒塗り', value: 'black' },
+        ],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const rgb = s.t(toRGB(cv, src));
+        const out = rgb.clone();
+        const [x, y, w, h] = clampRect(p.rect, src.cols, src.rows);
+        const roi = s.t(out.roi(new cv.Rect(x, y, w, h)));
+        const mode = str(p.mode, 'mosaic');
+        if (mode === 'black') {
+          roi.setTo(new cv.Scalar(15, 18, 26));
+        } else if (mode === 'blur') {
+          cv.GaussianBlur(roi, roi, new cv.Size(31, 31), 0);
+        } else {
+          const bk = Math.max(2, Math.round(num(p.block, 16)));
+          const sw = Math.max(1, Math.round(w / bk)), sh = Math.max(1, Math.round(h / bk));
+          const small = s.t(new cv.Mat());
+          cv.resize(roi, small, new cv.Size(sw, sh), 0, 0, cv.INTER_LINEAR);
+          cv.resize(small, roi, new cv.Size(w, h), 0, 0, cv.INTER_NEAREST);
+        }
+        return { output: out, info: [{ label: '対象領域', value: `${w}×${h} px` }, { label: '処理', value: mode }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-auto-canny': {
+    defaultSample: 'coins',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① ぼかし', value: 'blur' },
+          { label: '② 自動Canny (完成)', value: 'final' },
+        ],
+      },
+      { id: 'sigma', label: 'σ (中央値からの幅)', type: 'slider', min: 0.1, max: 0.6, step: 0.05, default: 0.33 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const blur = s.t(new cv.Mat());
+        cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0);
+        if (stage === 'blur') return { output: blur.clone(), info: [{ label: 'ステップ', value: '① 軽いぼかし' }] };
+        // median of pixel values → adaptive thresholds (PyImageSearch auto-canny)
+        const d = blur.data;
+        const hist = new Array(256).fill(0);
+        for (let i = 0; i < d.length; i++) hist[d[i]]++;
+        let cum = 0, median = 128;
+        const half = d.length / 2;
+        for (let v = 0; v < 256; v++) { cum += hist[v]; if (cum >= half) { median = v; break; } }
+        const sigma = num(p.sigma, 0.33);
+        const lower = Math.max(0, Math.round((1 - sigma) * median));
+        const upper = Math.min(255, Math.round((1 + sigma) * median));
+        const edges = new cv.Mat();
+        cv.Canny(blur, edges, lower, upper);
+        return {
+          output: edges,
+          info: [
+            { label: 'パイプライン', value: 'median → Canny(自動しきい値)' },
+            { label: '中央値 / 下限 / 上限', value: `${median} / ${lower} / ${upper}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-contrast-stretch': {
+    defaultSample: 'low-contrast',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 元画像(グレー)', value: 'original' },
+          { label: '② コントラスト伸張 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'clip', label: '外れ値クリップ (%)', type: 'slider', min: 0, max: 10, step: 0.5, default: 2 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        if (stage === 'original') return { output: gray.clone(), info: [{ label: 'ステップ', value: '① 低コントラストのグレー' }] };
+        // percentile clip then linear stretch [low,high] → [0,255]
+        const d = gray.data;
+        const hist = new Array(256).fill(0);
+        for (let i = 0; i < d.length; i++) hist[d[i]]++;
+        const clipFrac = num(p.clip, 2) / 100;
+        const total = d.length;
+        let cum = 0, low = 0, high = 255;
+        for (let v = 0; v < 256; v++) { cum += hist[v]; if (cum >= total * clipFrac) { low = v; break; } }
+        cum = 0;
+        for (let v = 255; v >= 0; v--) { cum += hist[v]; if (cum >= total * clipFrac) { high = v; break; } }
+        if (high <= low) high = low + 1;
+        const alpha = 255 / (high - low);
+        const out = new cv.Mat();
+        gray.convertTo(out, -1, alpha, -low * alpha);
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: `[${low},${high}] → [0,255] 線形伸張` },
+            { label: '傾き α', value: alpha.toFixed(2) },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-color-pop': {
+    defaultSample: 'colored-objects',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 残す色のマスク', value: 'mask' },
+          { label: '② カラーポップ (完成)', value: 'final' },
+        ],
+      },
+      { id: 'hLow', label: '残す色相 下限', type: 'slider', min: 0, max: 179, step: 1, default: 0 },
+      { id: 'hHigh', label: '残す色相 上限', type: 'slider', min: 0, max: 179, step: 1, default: 12 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        const hsv = s.t(new cv.Mat());
+        cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+        const low = s.t(new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [num(p.hLow, 0), 80, 50, 0]));
+        const high = s.t(new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [num(p.hHigh, 12), 255, 255, 255]));
+        const mask = s.t(new cv.Mat());
+        cv.inRange(hsv, low, high, mask);
+        if (stage === 'mask') return { output: mask.clone(), info: [{ label: 'ステップ', value: '① 残す色のマスク' }] };
+        const gray = s.t(new cv.Mat());
+        cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
+        const out = new cv.Mat();
+        cv.cvtColor(gray, out, cv.COLOR_GRAY2RGB); // モノクロ背景
+        rgb.copyTo(out, mask); // 指定色だけカラーで戻す
+        return { output: out, info: [{ label: 'パイプライン', value: '色マスク → 背景グレー化 → 色を戻す' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-gradient-orientation': {
+    defaultSample: 'shapes',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 勾配の大きさ', value: 'mag' },
+          { label: '② 方向マップ (完成)', value: 'final' },
+        ],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const gx = s.t(new cv.Mat()), gy = s.t(new cv.Mat());
+        cv.Sobel(gray, gx, cv.CV_32F, 1, 0, 3);
+        cv.Sobel(gray, gy, cv.CV_32F, 0, 1, 3);
+        const mag = s.t(new cv.Mat()), ang = s.t(new cv.Mat());
+        cv.cartToPolar(gx, gy, mag, ang, true);
+        const magN = s.t(new cv.Mat());
+        cv.normalize(mag, magN, 0, 255, cv.NORM_MINMAX);
+        if (stage === 'mag') {
+          const m8 = s.t(new cv.Mat());
+          magN.convertTo(m8, cv.CV_8U);
+          return { output: m8.clone(), info: [{ label: 'ステップ', value: '① 勾配の大きさ(エッジ強度)' }] };
+        }
+        const n = gray.rows * gray.cols;
+        const hsv = s.t(new cv.Mat(gray.rows, gray.cols, cv.CV_8UC3));
+        const hd = hsv.data, md = magN.data32F, ad = ang.data32F;
+        for (let i = 0; i < n; i++) {
+          hd[i * 3] = Math.round(ad[i] / 2) % 180; // 色相=方向
+          hd[i * 3 + 1] = 255;
+          hd[i * 3 + 2] = Math.min(255, md[i]); // 明度=強度
+        }
+        const out = new cv.Mat();
+        cv.cvtColor(hsv, out, cv.COLOR_HSV2RGB);
+        return { output: out, info: [{ label: 'パイプライン', value: 'Sobel x,y → cartToPolar → HSV' }, { label: '色', value: '色相=エッジの向き / 明度=強さ' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-binary-cleanup': {
+    defaultSample: 'noisy',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 生の二値化', value: 'raw' },
+          { label: '② 開処理(点除去)', value: 'opened' },
+          { label: '③ 閉処理(穴埋め, 完成)', value: 'final' },
+        ],
+      },
+      { id: 'k', label: 'カーネルサイズ', type: 'slider', min: 1, max: 15, step: 2, default: 3 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const bin = s.t(new cv.Mat());
+        cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+        if (stage === 'raw') return { output: bin.clone(), info: [{ label: 'ステップ', value: '① 生の二値化(ノイズだらけ)' }] };
+        const k = odd(num(p.k, 3));
+        const M = s.t(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(k, k)));
+        const opened = s.t(new cv.Mat());
+        cv.morphologyEx(bin, opened, cv.MORPH_OPEN, M);
+        if (stage === 'opened') return { output: opened.clone(), info: [{ label: 'ステップ', value: '② 開処理で孤立点を除去' }] };
+        const out = new cv.Mat();
+        cv.morphologyEx(opened, out, cv.MORPH_CLOSE, M);
+        return { output: out, info: [{ label: 'パイプライン', value: '二値化 → 開(点除去) → 閉(穴埋め)' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-size-sort': {
+    defaultSample: 'coins',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 二値化', value: 'binary' },
+          { label: '② 大きさで仕分け (完成)', value: 'final' },
+        ],
+      },
+      { id: 'thresh', label: '大小の境界面積', type: 'slider', min: 1000, max: 25000, step: 500, default: 12000 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        const bin = s.t(new cv.Mat());
+        cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+        const M = s.t(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5)));
+        cv.morphologyEx(bin, bin, cv.MORPH_OPEN, M);
+        if (stage === 'binary') return { output: bin.clone(), info: [{ label: 'ステップ', value: '① Otsu二値化+開' }] };
+        const contours = s.t(new cv.MatVector());
+        const hier = s.t(new cv.Mat());
+        cv.findContours(bin, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        const out = src.clone();
+        const GREEN = new cv.Scalar(52, 224, 161, 255), ORANGE = new cv.Scalar(245, 165, 36, 255);
+        const boundary = num(p.thresh, 12000);
+        let small = 0, large = 0;
+        for (let i = 0; i < contours.size(); i++) {
+          const area = cv.contourArea(contours.get(i));
+          if (area < 300) continue;
+          const big = area >= boundary;
+          cv.drawContours(out, contours, i, big ? ORANGE : GREEN, -1);
+          if (big) large++; else small++;
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: '二値化 → 輪郭 → 面積で分類' },
+            { label: '大(橙) / 小(緑)', value: `${large} / ${small}` },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-count-by-color': {
+    defaultSample: 'colored-objects',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 全色マスク', value: 'mask' },
+          { label: '② 色別カウント (完成)', value: 'final' },
+        ],
+      },
+      { id: 'sMin', label: '彩度しきい値', type: 'slider', min: 20, max: 200, step: 5, default: 80 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        const hsv = s.t(new cv.Mat());
+        cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+        const sMin = num(p.sMin, 80);
+        const bands: { name: string; lo: number; hi: number; col: [number, number, number] }[] = [
+          { name: '赤', lo: 0, hi: 12, col: [255, 77, 109] },
+          { name: '黄', lo: 20, hi: 40, col: [245, 196, 15] },
+          { name: '緑', lo: 41, hi: 85, col: [52, 224, 161] },
+          { name: '青', lo: 95, hi: 130, col: [52, 152, 219] },
+          { name: '紫', lo: 131, hi: 160, col: [155, 89, 182] },
+        ];
+        const out = stage === 'final' ? src.clone() : new cv.Mat(src.rows, src.cols, cv.CV_8UC3, new cv.Scalar(15, 18, 26));
+        const counts: string[] = [];
+        for (const b of bands) {
+          const low = s.t(new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [b.lo, sMin, 40, 0]));
+          const high = s.t(new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [b.hi, 255, 255, 255]));
+          const mask = s.t(new cv.Mat());
+          cv.inRange(hsv, low, high, mask);
+          const cont = s.t(new cv.MatVector());
+          const hier = s.t(new cv.Mat());
+          cv.findContours(mask, cont, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+          let c = 0;
+          for (let i = 0; i < cont.size(); i++) {
+            if (cv.contourArea(cont.get(i)) < 500) continue;
+            if (stage === 'final') cv.drawContours(out, cont, i, new cv.Scalar(b.col[0], b.col[1], b.col[2], 255), 4);
+            else cv.drawContours(out, cont, i, new cv.Scalar(b.col[0], b.col[1], b.col[2]), -1);
+            c++;
+          }
+          if (c > 0) counts.push(`${b.name}:${c}`);
+        }
+        return {
+          output: out,
+          info: [
+            { label: 'パイプライン', value: '色帯ごとに inRange → 輪郭 → 計数' },
+            { label: '色別個数', value: counts.join('  ') || '0' },
+          ],
+        };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-pseudocolor': {
+    defaultSample: 'dark',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① グレースケール', value: 'gray' },
+          { label: '② 疑似カラー (完成)', value: 'final' },
+        ],
+      },
+      {
+        id: 'map', label: 'カラーマップ', type: 'select', default: 'jet',
+        options: [{ label: 'JET (青→赤)', value: 'jet' }, { label: 'HOT (黒→白熱)', value: 'hot' }],
+      },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const gray = s.t(toGray(cv, src));
+        if (stage === 'gray') return { output: gray.clone(), info: [{ label: 'ステップ', value: '① グレースケール(輝度)' }] };
+        const out = new cv.Mat(gray.rows, gray.cols, cv.CV_8UC3);
+        const gd = gray.data, od = out.data;
+        const clamp = (x: number) => Math.max(0, Math.min(255, Math.round(x * 255)));
+        const map = str(p.map, 'jet');
+        for (let i = 0; i < gd.length; i++) {
+          const t = gd[i] / 255;
+          if (map === 'hot') {
+            od[i * 3] = clamp(3 * t); od[i * 3 + 1] = clamp(3 * t - 1); od[i * 3 + 2] = clamp(3 * t - 2);
+          } else {
+            od[i * 3] = clamp(1.5 - Math.abs(4 * t - 3));
+            od[i * 3 + 1] = clamp(1.5 - Math.abs(4 * t - 2));
+            od[i * 3 + 2] = clamp(1.5 - Math.abs(4 * t - 1));
+          }
+        }
+        return { output: out, info: [{ label: 'パイプライン', value: '輝度 → カラーマップLUT' }, { label: 'マップ', value: map.toUpperCase() }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-glow-bloom': {
+    defaultSample: 'scene',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 明部の抽出', value: 'bright' },
+          { label: '② グロー合成 (完成)', value: 'final' },
+        ],
+      },
+      { id: 'thresh', label: '明部しきい値', type: 'slider', min: 100, max: 255, step: 5, default: 180 },
+      { id: 'strength', label: 'グローの強さ', type: 'slider', min: 0, max: 2, step: 0.1, default: 0.8 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        const gray = s.t(toGray(cv, src));
+        const brightMask = s.t(new cv.Mat());
+        cv.threshold(gray, brightMask, num(p.thresh, 180), 255, cv.THRESH_BINARY);
+        const bright = s.t(new cv.Mat());
+        cv.bitwise_and(rgb, rgb, bright, brightMask);
+        if (stage === 'bright') return { output: bright.clone(), info: [{ label: 'ステップ', value: '① 明るい部分だけ抽出' }] };
+        const glow = s.t(new cv.Mat());
+        cv.GaussianBlur(bright, glow, new cv.Size(31, 31), 0);
+        const out = new cv.Mat();
+        cv.addWeighted(rgb, 1, glow, num(p.strength, 0.8), 0, out);
+        return { output: out, info: [{ label: 'パイプライン', value: '明部抽出 → ぼかし → 加算合成' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-vignette': {
+    defaultSample: 'scene',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 元画像', value: 'original' },
+          { label: '② ビネット (完成)', value: 'final' },
+        ],
+      },
+      { id: 'strength', label: '減光の強さ', type: 'slider', min: 0, max: 1, step: 0.05, default: 0.75 },
+      { id: 'radius', label: '効果開始の半径', type: 'slider', min: 0.1, max: 0.9, step: 0.05, default: 0.55 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'final');
+        const rgb = s.t(toRGB(cv, src));
+        if (stage === 'original') return { output: rgb.clone(), info: [{ label: 'ステップ', value: '① 元画像' }] };
+        const out = rgb.clone();
+        const od = out.data;
+        const cols = out.cols, rows = out.rows;
+        const cx = cols / 2, cy = rows / 2, maxD = Math.hypot(cx, cy);
+        const strength = num(p.strength, 0.75), radius = num(p.radius, 0.55);
+        for (let y = 0; y < rows; y++) {
+          for (let x = 0; x < cols; x++) {
+            const d = Math.hypot(x - cx, y - cy) / maxD;
+            let f = 1 - strength * Math.max(0, (d - radius) / (1 - radius));
+            if (f < 0) f = 0;
+            const i = (y * cols + x) * 3;
+            od[i] = Math.round(od[i] * f); od[i + 1] = Math.round(od[i + 1] * f); od[i + 2] = Math.round(od[i + 2] * f);
+          }
+        }
+        return { output: out, info: [{ label: 'パイプライン', value: '中心からの距離で減光マスクを乗算' }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
+
+  'recipe-motion-blur': {
+    defaultSample: 'shapes',
+    params: [
+      {
+        id: 'stage', label: '表示ステップ', type: 'select', default: 'final',
+        options: [
+          { label: '① 元画像', value: 'original' },
+          { label: '② 方向ブラー (完成)', value: 'final' },
+        ],
+      },
+      { id: 'length', label: 'ブレの長さ', type: 'slider', min: 3, max: 41, step: 2, default: 15 },
+      { id: 'angle', label: 'ブレの角度 (°)', type: 'slider', min: 0, max: 180, step: 5, default: 0 },
+    ],
+    run: (cv, src, p) => {
+      const s = new Scope();
+      try {
+        const stage = str(p.stage, 'original');
+        const rgb = s.t(toRGB(cv, src));
+        if (stage === 'original') return { output: rgb.clone(), info: [{ label: 'ステップ', value: '① 元画像' }] };
+        const L = odd(num(p.length, 15));
+        const ang = (num(p.angle, 0) * Math.PI) / 180;
+        // line kernel of length L at the given angle, normalized
+        const kdata = new Array(L * L).fill(0);
+        const c = (L - 1) / 2;
+        const dx = Math.cos(ang), dy = Math.sin(ang);
+        let cnt = 0;
+        for (let t = -(L - 1) / 2; t <= (L - 1) / 2; t++) {
+          const xx = Math.round(c + dx * t), yy = Math.round(c + dy * t);
+          if (xx >= 0 && xx < L && yy >= 0 && yy < L && kdata[yy * L + xx] === 0) { kdata[yy * L + xx] = 1; cnt++; }
+        }
+        for (let i = 0; i < kdata.length; i++) kdata[i] /= cnt;
+        const kernel = s.t(cv.matFromArray(L, L, cv.CV_32F, kdata));
+        const out = new cv.Mat();
+        cv.filter2D(rgb, out, -1, kernel);
+        return { output: out, info: [{ label: 'パイプライン', value: '線状カーネル → filter2D' }, { label: '方向', value: `${Math.round(num(p.angle, 0))}° / 長さ${L}` }] };
+      } finally {
+        s.done();
+      }
+    },
+  },
 };
 
 /** Build a morphology demo impl (erosion/dilation/opening/closing). */

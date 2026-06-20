@@ -20,6 +20,7 @@ const palette: Record<string, string> = {
   'machine-learning': '#facc15',
   'dnn-deep-learning': '#34e0a1',
   'io-ui-browser': '#9aa4b8',
+  recipes: '#fbbf24',
 };
 
 export function categoryAccent(categoryId: string): string {

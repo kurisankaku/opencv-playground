@@ -1540,4 +1540,565 @@ export const demoGuides: Record<string, DemoGuide> = {
     ],
     useCases: [`inpaint で消したい領域をブラシで塗ってマスクとして渡す。`, `GrabCut の前景/背景をなぞって指定する対話的セグメンテーション入力。`, `kNN手書き数字認識で、数字を描いて分類器に渡す入力面にする。`, `領域指定が必要なフィルタ（部分ぼかし・部分補正）のマスク作成に使う。`],
   },
+
+  // ---- 組み合わせレシピ ----
+  'recipe-line-enhance': {
+    overview: `照明ムラのある書類画像から、細い線や文字を途切れさせずにくっきり抽出する定番レシピです。単純な固定しきい値では影の部分が黒く潰れますが、適応的二値化が画素ごとに局所的なしきい値を計算するため照明変化を吸収できます。最後にモルフォロジー閉処理を掛けることで、線のかすれや小さな途切れを連結し、読みやすい線画にします。`,
+    pipeline: [`グレースケール化して輝度1チャンネルにする`, `適応的二値化(ADAPTIVE_THRESH_GAUSSIAN_C)で局所しきい値を計算し白黒化する`, `モルフォロジー閉処理(MORPH_CLOSE)で線の途切れを連結し小穴を埋める`, `「表示ステップ」で各段階を切り替えて効果を確認できる`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `パイプラインのどの中間結果を表示するか。グレー→適応二値化→完成と切り替えると各手法の役割が分かる。` },
+      { arg: `block (ブロックサイズ)`, desc: `適応的二値化が局所しきい値を計算する窓の一辺(奇数)。大きいほど広い範囲の平均を見るので大きな文字向き、小さいほど細部に追従するが影響範囲が狭い。15前後が目安。` },
+      { arg: `C (定数)`, desc: `局所平均から引く補正値。大きくするとより暗い画素だけが前景に残り線が細く、小さく(負に)すると太く拾う。ノイズが多いなら少し大きめに。` },
+      { arg: `k (モルフォロジーカーネル)`, desc: `閉処理の構造要素サイズ(奇数)。大きいほど離れた線も繋がるが太り、文字が潰れる。線の途切れ幅に合わせて3〜5程度。` },
+    ],
+    code: [
+      `let gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY); // ① グレースケール`,
+      `let th = new cv.Mat();`,
+      `// ② 適応的二値化: 局所平均-C をしきい値に。GAUSSIAN_C=ガウシアン重み付き平均`,
+      `cv.adaptiveThreshold(gray, th, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 15 /* ブロック(奇数) */, 8 /* 定数C */);`,
+      `// ③ 閉処理(膨張→収縮)で線の途切れを連結`,
+      `let k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3,3));`,
+      `let dst = new cv.Mat(); cv.morphologyEx(th, dst, cv.MORPH_CLOSE, k);`,
+    ],
+    useCases: [`影やグラデーションのある書類撮影画像から文字・罫線を抽出する`, `OCRエンジンに渡す前の二値化前処理`, `図面・回路図の線を強調してトレースしやすくする`, `手書きノートの線をくっきりさせてデジタル化する`],
+  },
+
+  'recipe-clean-binarize': {
+    overview: `ザラついたノイズの多い画像でも、きれいな白黒分離を得るための基礎レシピです。ノイズが残ったままOtsu二値化すると輝度ヒストグラムの山が不明瞭になり、自動しきい値がぶれて結果が荒れます。先にガウシアンぼかしでノイズを均すとヒストグラムの双峰性(前景の山と背景の山)が鮮明になり、Otsuが最適なしきい値を選びやすくなります。`,
+    pipeline: [`グレースケール化する`, `ガウシアンぼかしで高周波ノイズを平滑化する`, `Otsu法でヒストグラムから最適しきい値を自動決定し二値化する`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `グレー→ぼかし→Otsu完成の切替。ぼかしの有無でOtsuのしきい値がどう安定するかを比較できる。` },
+      { arg: `k (ぼかしカーネル)`, desc: `ガウシアンぼかしの窓サイズ(奇数)。大きいほどノイズは消えるが輪郭も鈍る。ノイズ量に応じて3〜7程度。0だと前処理なしのOtsuと同じ。` },
+    ],
+    code: [
+      `let gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);`,
+      `let blur = new cv.Mat();`,
+      `cv.GaussianBlur(gray, blur, new cv.Size(5,5) /* 奇数カーネル */, 0 /* σ=0で自動 */); // ノイズ平滑化`,
+      `let dst = new cv.Mat();`,
+      `// Otsu: 第3引数0は無視され、ヒストグラムから最適しきい値を自動計算`,
+      `let t = cv.threshold(blur, dst, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);`,
+    ],
+    useCases: [`センサーノイズの多い暗所撮影画像の二値化`, `スキャン文書のごま塩ノイズ除去後の白黒化`, `自動しきい値処理を安定させたい前処理全般`, `顕微鏡・天体画像の粒状ノイズ低減後のセグメンテーション`],
+  },
+
+  'recipe-color-segment': {
+    overview: `「特定の色の物体だけを抜き出す」色ベースセグメンテーションの正準パイプラインです。RGBは色が3チャンネルに分散して範囲指定が難しいため、まずHSVに変換します。色相(Hue)チャンネルが色の種類を1軸で表すので、inRangeで色相・彩度・明度の範囲を指定するだけで目的色のマスクが得られます。モルフォロジーの開→閉でマスクの点ノイズと穴を整え、bitwise_andで元画像に適用します。`,
+    pipeline: [`RGB→HSV変換で色相軸を使えるようにする`, `inRangeで色相/彩度/明度の範囲内を白(255)にした二値マスクを作る`, `モルフォロジー開(点ノイズ除去)→閉(穴埋め)でマスクを清掃する`, `bitwise_andでマスク部分の元画像だけを残す`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `マスク→清掃後→適用結果の切替。モルフォロジー清掃の効果がよく分かる。` },
+      { arg: `hLow / hHigh (色相範囲)`, desc: `抽出する色相の下限・上限(OpenCVのHueは0〜179)。緑なら約35〜85、青なら約100〜130。赤は0付近と179付近にまたがるため2範囲のORが必要。` },
+      { arg: `sMin (彩度下限)`, desc: `鮮やかさの下限。上げると淡い色や白っぽい背景を除外でき、誤検出が減る。70前後が目安。` },
+      { arg: `k (清掃カーネル)`, desc: `開・閉処理の構造要素サイズ。大きいほど強くノイズ除去/穴埋めするが、細い対象は消える。` },
+    ],
+    code: [
+      `let hsv = new cv.Mat(); cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV); // ① HSVへ`,
+      `let low = new cv.Mat(h, w, hsv.type(), [35,70,40,0]);   // 色相35,彩度70,明度40 以上`,
+      `let high = new cv.Mat(h, w, hsv.type(), [85,255,255,255]); // 色相85 以下`,
+      `let mask = new cv.Mat(); cv.inRange(hsv, low, high, mask); // ② 範囲内を白マスク`,
+      `let k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5,5));`,
+      `cv.morphologyEx(mask, mask, cv.MORPH_OPEN, k);  // ③ 点ノイズ除去`,
+      `cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, k); //    穴埋め`,
+      `let dst = new cv.Mat(); cv.bitwise_and(rgb, rgb, dst, mask); // ④ マスク適用`,
+    ],
+    useCases: [`緑のボール・特定色の商品など色で物体を追跡する前処理`, `信号機・道路標識の色領域抽出`, `単色背景(グリーンバック)の被写体切り抜き`, `果実の熟度を色で判定する農業画像解析`],
+  },
+
+  'recipe-blob-count': {
+    overview: `画像中の物体の個数を自動で数える「ブロブ解析」の定番パイプラインです。Otsu二値化で前景を白く分離し、モルフォロジー開処理で点ノイズや細い繋がりを除去してから輪郭を抽出します。各輪郭の面積でフィルタすることで、ノイズや小さすぎる領域を除外し、残った輪郭の数=物体数として数えます。接触していない物体に有効で、接触物体はWatershedが必要です。`,
+    pipeline: [`グレースケール化しOtsu二値化で前景を白くする`, `モルフォロジー開処理で点ノイズ・微小な接続を除去する`, `findContoursで外側輪郭を抽出する`, `contourAreaで最小面積未満を除外し、残りを数えて番号を振る`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `二値化→開処理→輪郭+カウントの切替。開処理が過剰カウントをどう防ぐか分かる。` },
+      { arg: `k (開処理カーネル)`, desc: `開処理の構造要素サイズ。大きいほど点ノイズや細い橋を強く除去するが、小さな物体も消える。` },
+      { arg: `minArea (最小面積)`, desc: `これ未満の輪郭をノイズとして無視する画素面積。対象物体の実サイズに合わせて設定すると誤カウントが激減する。` },
+    ],
+    code: [
+      `cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);`,
+      `cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU); // ① 二値化`,
+      `let k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5,5));`,
+      `cv.morphologyEx(bin, opened, cv.MORPH_OPEN, k); // ② ノイズ除去`,
+      `cv.findContours(opened, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE); // ③ 輪郭`,
+      `let count = 0;`,
+      `for (let i=0;i<contours.size();i++)`,
+      `  if (cv.contourArea(contours.get(i)) >= 800) count++; // ④ 面積で選別しカウント`,
+    ],
+    useCases: [`コイン・錠剤・ネジなど部品の個数を数える`, `顕微鏡画像で細胞・コロニーを計数する`, `生産ラインの製品カウント`, `空撮画像で樹木・車両の数を概算する`],
+  },
+
+  'recipe-shape-classify': {
+    overview: `図形の種類(三角形・四角形・円など)を自動で判定するパイプラインです。二値化して輪郭を抽出した後、approxPolyDPで輪郭を少ない頂点の多角形に近似し、その頂点数で形状を分類します。3頂点なら三角形、4頂点なら四角形、頂点が多ければ円、という単純で堅牢なルールが使えます。近似精度(epsilon)が頂点数を左右する重要パラメータです。`,
+    pipeline: [`グレースケール化し反転Otsu二値化で図形を白くする`, `findContoursで各図形の輪郭を取得する`, `arcLengthで周囲長を求め、approxPolyDP(ε=周囲長×比率)で多角形近似する`, `頂点数から図形名を判定してラベル表示する`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `二値化→輪郭→分類結果の切替。近似前後で頂点がどう減るか確認できる。` },
+      { arg: `epsilon (近似精度)`, desc: `周囲長に対する許容誤差の比率。小さいほど元の輪郭に忠実(頂点が多い)、大きいほど大胆に簡略化(頂点が減る)。2〜4%が目安で、これが分類精度を決める。` },
+      { arg: `minArea (最小面積)`, desc: `これ未満の小さな輪郭(ノイズ)を分類対象から除外する。` },
+    ],
+    code: [
+      `cv.threshold(gray, bin, 0,255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU); // ① 二値化`,
+      `cv.findContours(bin, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE); // ② 輪郭`,
+      `let peri = cv.arcLength(cnt, true); // 周囲長`,
+      `cv.approxPolyDP(cnt, approx, 0.03 * peri /* ε=3%周長 */, true); // ③ 多角形近似`,
+      `let v = approx.rows; // ④ 頂点数で分類`,
+      `let name = v===3 ? '三角形' : v===4 ? '四角形' : v===5 ? '五角形' : '円';`,
+    ],
+    useCases: [`道路標識の形状(三角=警戒/丸=規制)で種類を絞り込む`, `製造部品を形状で仕分けする`, `ARマーカー・基準図形の認識`, `手描き図形のデジタル整形`],
+  },
+
+  'recipe-line-detect': {
+    overview: `画像中の直線を検出する、車線検出や罫線抽出の定番パイプラインです。グレースケール化とガウシアンぼかしでノイズを抑え、Cannyでエッジ(輪郭線)を抽出してから、確率的Hough変換(HoughLinesP)でエッジ点の並びを直線分として取り出します。HoughLinesPは端点座標を返すので、そのまま線分として描画できます。実用ではCanny後に関心領域(ROI)の台形マスクを掛けて路面だけに絞ります。`,
+    pipeline: [`グレースケール化する`, `ガウシアンぼかしでノイズを抑えエッジ検出を安定させる`, `Cannyでエッジ画像を作る`, `HoughLinesPでエッジから直線分(端点)を検出して描画する`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `エッジ画像→直線検出結果の切替。Cannyのエッジから直線が抽出される様子が分かる。` },
+      { arg: `t1 / t2 (Cannyしきい値)`, desc: `エッジ判定の下限・上限。比は1:2〜1:3が目安。上げると弱いエッジが消え、下げるとノイズエッジが増える。` },
+      { arg: `thresh (Hough投票しきい値)`, desc: `直線とみなすのに必要なエッジ点の投票数。大きいほど明確な長い直線だけ残り、小さいほど短い線も拾うが誤検出が増える。` },
+      { arg: `minLen (最小線長)`, desc: `これより短い線分を破棄する。短い断片ノイズを除くのに有効。` },
+    ],
+    code: [
+      `cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);`,
+      `cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0); // ① 平滑化`,
+      `cv.Canny(blur, edges, 50 /* 下限 */, 150 /* 上限 */); // ② エッジ`,
+      `// ③ 確率的Hough: rho=1px, theta=1°, 投票60以上, 最小長60, 最大ギャップ10`,
+      `cv.HoughLinesP(edges, lines, 1, Math.PI/180, 60, 60, 10);`,
+      `for (let i=0;i<lines.rows;i++){ // 端点(x1,y1,x2,y2)を線で描画`,
+      `  let d = lines.data32S; cv.line(dst, new cv.Point(d[i*4],d[i*4+1]), new cv.Point(d[i*4+2],d[i*4+3]), color, 3); }`,
+    ],
+    useCases: [`走行映像からの車線(レーン)検出`, `書類・表の罫線や枠の検出`, `建築/図面画像の直線エッジ抽出`, `スポーツコートのライン検出`],
+  },
+
+  'recipe-clahe-enhance': {
+    overview: `逆光や霧で眠い写真を、色を崩さずにくっきりさせるコントラスト強調レシピです。RGBに直接均一化を掛けると色が転んでしまうため、まずLab色空間に分解し、明度(L)チャンネルだけにCLAHE(コントラスト制限付き適応的ヒストグラム均一化)を適用します。色情報(a,b)はそのまま残して再合成するので、自然な色合いのまま暗部のディテールと局所コントラストだけが改善されます。`,
+    pipeline: [`RGB→Lab変換で明度(L)と色(a,b)を分離する`, `LチャンネルにCLAHEを適用しタイル単位で局所コントラストを強調する`, `強調したLと元のa,bを再合成しLab→RGBに戻す`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `元画像→L成分のCLAHE結果→カラー合成の切替。明度だけが強調される様子が分かる。` },
+      { arg: `clip (クリップ上限)`, desc: `コントラスト強調の上限。大きいほど強く強調するが、平坦部のノイズも増幅される。2〜4が目安。` },
+      { arg: `tiles (タイル分割数)`, desc: `画像を何×何のタイルに分けて局所均一化するか。多いほど細かい局所適応になるが処理が重くなる。8前後が標準。` },
+    ],
+    code: [
+      `cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab); // ① Labへ`,
+      `let ch = new cv.MatVector(); cv.split(lab, ch); // L,a,b に分解`,
+      `let clahe = new cv.CLAHE(3 /* clip */, new cv.Size(8,8) /* tiles */);`,
+      `let L2 = new cv.Mat(); clahe.apply(ch.get(0), L2); // ② L だけ強調`,
+      `let merged = new cv.MatVector();`,
+      `merged.push_back(L2); merged.push_back(ch.get(1)); merged.push_back(ch.get(2));`,
+      `cv.merge(merged, lab2); cv.cvtColor(lab2, dst, cv.COLOR_Lab2RGB); // ③ 再合成`,
+    ],
+    useCases: [`逆光・霧・水中写真のコントラスト復元`, `内視鏡・X線など医用画像の視認性向上`, `暗所撮影の暗部ディテール強調`, `衛星/ドローン画像の地表コントラスト改善`],
+  },
+
+  'recipe-unsharp-mask': {
+    overview: `「ぼかした画像を引き算する」ことで輪郭を強調する、写真編集で最も使われる古典的シャープ化です。原理は、元画像からぼかし版(=低周波成分)を差し引くと輪郭などの高周波成分が残ることを利用します。実装は加重加算 dst = src×(1+量) − blur×量 の一発で、ぼかし半径が強調する輪郭のスケールを、量(amount)が強調の強さを決めます。`,
+    pipeline: [`元画像をガウシアンぼかしして低周波(なだらかな)成分を作る`, `元画像を強め(1+量)に、ぼかしを負(−量)に重み付けして加算する`, `差し引きで高周波の輪郭が強調された画像が得られる`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `ぼかし(マスク)→シャープ化結果の切替。どんなぼかしを引いているかが分かる。` },
+      { arg: `k (ぼかし半径)`, desc: `ガウシアンの窓サイズ(奇数)。小さいと細かいエッジ、大きいと太い輪郭やコントラストを強調する。` },
+      { arg: `amount (強さ)`, desc: `シャープ化の量。0で無効、大きいほど強調が強いが、行き過ぎるとエッジ周りに白い縁(ハロー)が出てノイズも目立つ。1前後が無難。` },
+    ],
+    code: [
+      `let blur = new cv.Mat();`,
+      `cv.GaussianBlur(rgb, blur, new cv.Size(7,7) /* ぼかし半径 */, 0); // ① ぼかし=マスク`,
+      `let dst = new cv.Mat();`,
+      `// ② src×(1+amount) − blur×amount。amount=0.5 → 1.5/-0.5`,
+      `cv.addWeighted(rgb, 1.5, blur, -0.5, 0, dst);`,
+    ],
+    useCases: [`写真の鮮鋭化(ピントの甘さ補正)`, `スキャン文書・図面の輪郭強調`, `印刷前のディテール強調`, `望遠/マクロ撮影のキレ向上`],
+  },
+
+  'recipe-skeletonize': {
+    overview: `図形を「幅1ピクセルの中心線(骨格)」まで細らせる細線化処理です。文字や形状の太さ情報を捨て、つながり方(トポロジー)だけを残すので、手書き文字認識や指紋・血管・道路網の解析に使われます。ここではモルフォロジーの開処理との差分(=各反復で消える縁)を蓄積しながら、形状が消えるまで収縮を繰り返す古典アルゴリズムで実装しています(opencv.jsにthinningが無いため自前)。`,
+    pipeline: [`グレースケール化し二値化して対象を白くする`, `開処理(MORPH_OPEN)を引いた差分=その回で削れる縁を骨格に足し込む`, `収縮(erode)して1段細らせ、白画素が無くなるまで繰り返す`, `蓄積した骨格が幅1の中心線になる`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `二値化→スケルトンの切替。元の太い形状が中心線に細る様子が分かる。` },
+    ],
+    code: [
+      `cv.threshold(gray, work, 0,255, cv.THRESH_BINARY_INV+cv.THRESH_OTSU); // ① 二値化`,
+      `let M = cv.getStructuringElement(cv.MORPH_CROSS, new cv.Size(3,3));`,
+      `let skel = cv.Mat.zeros(h, w, cv.CV_8UC1);`,
+      `while (cv.countNonZero(work) > 0) { // ② 形状が消えるまで反復`,
+      `  cv.morphologyEx(work, temp, cv.MORPH_OPEN, M);`,
+      `  cv.subtract(work, temp, temp);     // その回で削れる縁`,
+      `  cv.bitwise_or(skel, temp, skel);   // 骨格に蓄積`,
+      `  cv.erode(work, work, M);           // 1段細らせる`,
+      `}`,
+    ],
+    useCases: [`手書き文字・数字の細線化(OCR前処理)`, `指紋の隆線抽出`, `血管・神経・道路網の骨格解析`, `形状のトポロジー(分岐・端点)解析`],
+  },
+
+  'recipe-distance-centers': {
+    overview: `各物体の「中心点」を自動で求めるレシピで、Watershedの前景マーカー生成の核となる手順です。二値画像に距離変換を掛けると、各白画素が「最も近い背景までの距離」に置き換わり、物体の中心ほど高い値になります(=標高マップ)。その高い部分(ピーク)をしきい値で取り出し、連結成分の重心を計算すると、接触していても各物体の中心が1点ずつ得られます。`,
+    pipeline: [`二値化して物体を白くする`, `distanceTransformで物体中心ほど高い距離マップを作る`, `最大距離×比率でしきい処理してピーク(中心領域)を取り出す`, `connectedComponentsWithStatsでピークの重心=中心点を求めてマーキングする`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `二値化→距離変換→中心抽出の切替。距離マップが中心ほど明るくなるのが分かる。` },
+      { arg: `ratio (ピークしきい値)`, desc: `距離マップの最大値に対する比率。低いとピークが広がって隣と連結し中心が減り、高いと小さな物体のピークが消えて検出漏れする。0.5〜0.7が目安。` },
+    ],
+    code: [
+      `cv.threshold(gray, bin, 0,255, cv.THRESH_BINARY+cv.THRESH_OTSU); // ① 二値化`,
+      `cv.distanceTransform(bin, dist, cv.DIST_L2, 5); // ② 距離変換`,
+      `let mm = cv.minMaxLoc(dist);`,
+      `cv.threshold(dist, peaks, 0.55*mm.maxVal /* ピーク比 */, 255, cv.THRESH_BINARY); // ③`,
+      `peaks.convertTo(peaks8, cv.CV_8U);`,
+      `let n = cv.connectedComponentsWithStats(peaks8, labels, stats, centroids, 8, cv.CV_32S);`,
+      `for (let i=1;i<n;i++) cv.circle(dst, new cv.Point(centroids.data64F[i*2], centroids.data64F[i*2+1]), 9, color, -1); // ④ 中心`,
+    ],
+    useCases: [`接触したコイン/細胞の中心マーキング`, `Watershedのマーカー(シード)生成`, `粒子・果実の代表点抽出と計数`, `物体の重心追跡の初期化`],
+  },
+
+  'recipe-ocr-preprocess': {
+    overview: `OCR(文字認識)の精度を上げるための前処理レシピです。ガウシアンぼかしは文字のエッジまで鈍らせてしまいますが、bilateralFilter(バイラテラルフィルタ)は「色が近い画素だけ平均する」ためエッジ(文字の輪郭)を保ったままノイズや地紋だけを平滑化できます。その後に適応的二値化を掛けることで、影や地紋のある文書でも文字がシャープな白黒画像が得られ、OCRエンジンが読みやすくなります。`,
+    pipeline: [`bilateralFilterで文字エッジを保ちつつ背景ノイズ・地紋を平滑化する`, `グレースケール化する`, `適応的二値化で照明ムラを吸収しながら白黒文字画像にする`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `bilateral結果→二値化完成の切替。エッジ保持平滑とぼかしの違いが効いてくる。` },
+      { arg: `block (ブロックサイズ)`, desc: `適応的二値化の局所窓(奇数)。文字サイズに対して大きすぎると地紋を拾い、小さすぎると文字が欠ける。21前後が目安。` },
+      { arg: `C (定数)`, desc: `局所平均から引く値。大きくすると文字が細く・背景が白く、小さくすると太く拾う。地紋が残るなら少し大きめに。` },
+    ],
+    code: [
+      `cv.bilateralFilter(rgb, smooth, 9 /* 直径 */, 75 /* 色σ */, 75 /* 距離σ */, cv.BORDER_DEFAULT); // ① エッジ保持平滑`,
+      `cv.cvtColor(smooth, gray, cv.COLOR_RGB2GRAY);`,
+      `// ② 適応的二値化(局所しきい値)`,
+      `cv.adaptiveThreshold(gray, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 21 /* block */, 10 /* C */);`,
+    ],
+    useCases: [`OCRに渡す文書の二値化前処理`, `レシート・名刺・帳票の文字抽出`, `地紋や透かしのある用紙の文字分離`, `カメラ撮影文書(影あり)のクリーン化`],
+  },
+
+  'recipe-edge-overlay': {
+    overview: `Cannyで検出したエッジを元のカラー画像に色付きで重ねて、輪郭を強調した見やすい画像を作るレシピです。エッジ画像は単独だと白黒で文脈が分かりませんが、元画像に焼き込むことで「どの輪郭が検出されたか」を直感的に確認できます。エッジを少し膨張(dilate)させて線を太らせると視認性が上がります。エッジ検出のパラメータ調整やデバッグ表示に便利です。`,
+    pipeline: [`グレースケール化しCannyでエッジを抽出する`, `エッジを膨張(dilate)させて線を太らせる`, `エッジ画素の位置だけ元のカラー画像に強調色を上書きする`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `エッジのみ→元画像へ合成の切替。エッジ単独と文脈付きの違いが分かる。` },
+      { arg: `t1 / t2 (Cannyしきい値)`, desc: `エッジ判定の下限・上限。下げると細かいエッジ(テクスチャ)まで拾い、上げると主要な輪郭だけ残る。比は1:2〜1:3が目安。` },
+    ],
+    code: [
+      `cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);`,
+      `cv.Canny(gray, edges, 50 /* 下限 */, 150 /* 上限 */); // ① エッジ`,
+      `let M = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(2,2));`,
+      `cv.dilate(edges, edges, M); // ② 線を太らせる`,
+      `// ③ edges>0 の画素を元画像にハイライト色で上書き`,
+      `for (let i=0;i<n;i++) if (edges.data[i]) { od[i*3]=124; od[i*3+1]=92; od[i*3+2]=255; }`,
+    ],
+    useCases: [`エッジ検出結果のデバッグ・パラメータ調整表示`, `線画・図面の輪郭強調`, `製品輪郭の視認性向上(検査の可視化)`, `教育用のエッジ可視化`],
+  },
+
+  'recipe-coin-circles': {
+    overview: `硬貨のような円形物体を検出して数えるレシピです。輪郭ベースのカウントは物体が接触すると1つに数えてしまいますが、Hough円変換は「円である」という形状の事前知識を使うため、隣接していても円なら個別に検出できます。前段のメディアンぼかしは、硬貨表面の模様や文字が偽の小円として検出されるのを抑える重要な前処理です。`,
+    pipeline: [`グレースケール化する`, `メディアンぼかしで表面模様による偽円を抑制する`, `HoughCircles(HOUGH_GRADIENT)で円の中心と半径を検出する`, `検出した各円を描画し番号を振って計数する`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `ぼかし→円検出の切替。前処理が偽円をどう抑えるか確認できる。` },
+      { arg: `minDist (中心間最小距離)`, desc: `検出する円の中心同士の最小距離。小さすぎると同じ硬貨を重複検出し、大きすぎると近接した硬貨を見落とす。硬貨の直径程度に。` },
+      { arg: `param2 (検出しきい値)`, desc: `円とみなす投票の厳しさ。小さいほど多く(偽円も)検出し、大きいほど確実な円だけ残る。45前後から調整。` },
+    ],
+    code: [
+      `cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);`,
+      `cv.medianBlur(gray, gray, 5); // ① 偽円を抑える`,
+      `// ② HoughCircles: dp=1, minDist=50, param1=100(Canny上限), param2=45(投票しきい値)`,
+      `cv.HoughCircles(gray, circles, cv.HOUGH_GRADIENT, 1, 50, 100, 45, 0, 0);`,
+      `for (let i=0;i<circles.cols;i++){ // [x,y,r] が3つずつ並ぶ`,
+      `  let x=circles.data32F[i*3], y=circles.data32F[i*3+1], r=circles.data32F[i*3+2];`,
+      `  cv.circle(dst, new cv.Point(x,y), r, color, 3); }`,
+    ],
+    useCases: [`硬貨・ボタン・錠剤など円形物の計数`, `製造部品の穴(ボルト穴)位置検出`, `瞳孔・虹彩の検出`, `顕微鏡画像の円形細胞のカウント`],
+  },
+
+  'recipe-watershed-separate': {
+    overview: `接触・重なった物体を1つずつに分離する、セグメンテーションの代表的レシピです。単純な二値化＋輪郭では接触した硬貨が1つに繋がってしまいます。そこで距離変換で各物体の中心ほど高い「標高マップ」を作り、その山頂(ピーク)を物体ごとの種(マーカー)として、地形に水を注ぐように領域を広げるWatershedで境界線を引きます。各ステップを切り替えると、なぜこの手順で分離できるのかが分かります。`,
+    pipeline: [`Otsu二値化＋開処理で前景をきれいに分離する`, `距離変換で物体中心ほど高い標高マップを作る`, `標高ピーク(最大値×比率以上)を「確実な前景」マーカーにする`, `connectedComponentsでマーカーに番号を振り、Watershedで境界(=-1)を引く`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `二値化→距離変換→確実な前景→Watershed境界の4段階を切替。分離の仕組みが段階的に分かる。` },
+      { arg: `fg (前景しきい値)`, desc: `距離マップの最大値に対するピーク採用比。低いとピークが繋がって過分割/連結し、高いと小物体のマーカーが消えて分離漏れする。0.5〜0.7が目安。` },
+    ],
+    code: [
+      `cv.threshold(gray, bin, 0,255, cv.THRESH_BINARY+cv.THRESH_OTSU);`,
+      `cv.morphologyEx(bin, opening, cv.MORPH_OPEN, M, anchor, 2); // ① ノイズ除去`,
+      `cv.dilate(opening, sureBg, M, anchor, 3);     // 確実な背景`,
+      `cv.distanceTransform(opening, dist, cv.DIST_L2, 5); // ② 距離変換`,
+      `cv.threshold(dist, sureFg, 0.5*maxVal, 255, cv.THRESH_BINARY); // ③ 確実な前景`,
+      `cv.subtract(sureBg, sureFg8, unknown); // 不明領域`,
+      `cv.connectedComponents(sureFg8, markers); markers += 1; markers[unknown>0]=0;`,
+      `cv.watershed(rgb, markers); // ④ 境界 markers===-1`,
+    ],
+    useCases: [`接触したコイン・細胞・錠剤の分離計数`, `重なった果実・粒子の個別計測`, `密集した物体のインスタンスセグメンテーション`, `医用画像で接触核の分離`],
+  },
+
+  'recipe-color-replace': {
+    overview: `画像の中の特定の色だけを別の色に置き換えるレシピです。HSVに変換し、inRangeで置換したい色のマスクを作ります。色相(Hue)・彩度(Saturation)・明度(Value)のうち、マスク領域の色相だけをずらすことで、明るさや質感(陰影)はそのまま保ったまま色味だけを変えられます。商品の色違いバリエーション生成などに使えます。`,
+    pipeline: [`RGB→HSV変換する`, `inRangeで置換対象の色のマスクを作る`, `HSVを分解し、マスク内の画素の色相(H)にシフト量を加える`, `H,S,Vを再合成してRGBに戻す`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `色マスク→置換結果の切替。どの領域が対象かが分かる。` },
+      { arg: `hLow / hHigh (対象色相)`, desc: `置き換えたい元の色の色相範囲(0〜179)。デフォルトは赤(0〜12)。` },
+      { arg: `shift (色相シフト量)`, desc: `色相に加える値。90で約半周(赤→シアン系)、60で1/3周ずれる。彩度・明度は変えないので陰影が保たれる。` },
+    ],
+    code: [
+      `cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);`,
+      `cv.inRange(hsv, low, high, mask); // ① 対象色マスク`,
+      `cv.split(hsv, ch); // H,S,V に分解`,
+      `let H = ch.get(0);`,
+      `for (let i=0;i<H.data.length;i++) // ② マスク内のHをシフト`,
+      `  if (mask.data[i]) H.data[i] = (H.data[i] + 90) % 180;`,
+      `cv.merge(mergedVec, hsv2); cv.cvtColor(hsv2, dst, cv.COLOR_HSV2RGB); // ③ 戻す`,
+    ],
+    useCases: [`商品(服・車)の色違いバリエーション生成`, `特定色だけを強調/別色に変える写真加工`, `色覚多様性のシミュレーション`, `信号・標識の色変更による合成データ生成`],
+  },
+
+  'recipe-background-flatten': {
+    overview: `照明ムラ(片側が暗い、影がある)を取り除いて明るさを均一にするレシピです。文字より十分大きなカーネルでモルフォロジー開処理を行うと、暗い文字が消えて「背景(紙)の明るさ分布」だけが推定できます。元画像をこの推定背景で割る(divide)と、各画素が局所的な背景の明るさで正規化され、照明ムラが平坦化されて文字だけがくっきり残ります。OCRや顕微鏡画像の前処理の定番です。`,
+    pipeline: [`グレースケール化する`, `前景より大きいカーネルで開処理し、背景(照明)の明るさ分布を推定する`, `元画像を推定背景で割って(×255で正規化)照明ムラを除去する`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `推定背景→ムラ補正結果の切替。背景の明るさ分布が見える。` },
+      { arg: `k (背景推定カーネル)`, desc: `開処理の構造要素サイズ。文字や前景より大きく取る必要がある(小さいと前景まで背景に含まれ補正できない)。41前後。大きいほど滑らかな背景。` },
+    ],
+    code: [
+      `let M = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(41,41));`,
+      `cv.morphologyEx(gray, bg, cv.MORPH_OPEN, M); // ① 背景(照明)を推定`,
+      `// ② 元画像を背景で割って正規化: dst = gray×255 / bg`,
+      `cv.divide(gray, bg, dst, 255);`,
+    ],
+    useCases: [`照明ムラのある撮影文書のOCR前処理`, `顕微鏡画像のシェーディング補正`, `影付き写真の輝度均一化`, `不均一照明下の検査画像の正規化`],
+  },
+
+  'recipe-text-region': {
+    overview: `画像の中から文字が密集する「テキスト行」の領域を四角で囲み出すレシピです。まず暗い文字を二値化で白く抽出し、横長のカーネルで閉処理すると、バラバラの文字が行単位の塊に連結されます。その塊の外接矩形を取り、横長(アスペクト比)で絞り込むことで文字行を囲みます。背景の枠など大きすぎる領域は面積で除外します。OCRのレイアウト解析の前段に使われます。`,
+    pipeline: [`グレースケール化し反転Otsu二値化で暗い文字を白くする`, `横長カーネルの閉処理で文字を行ブロックに連結する`, `findContoursで連結した塊の輪郭を得る`, `外接矩形のうち横長で適度な大きさのものをテキスト行として囲む(背景枠は面積で除外)`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `二値化→横連結→テキスト領域の切替。文字が行に連結される様子が分かる。` },
+      { arg: `closeW (連結カーネル幅)`, desc: `閉処理の横幅。文字間隔より大きくすると1行に繋がり、小さいと文字がバラける。行検出なら20前後、単語検出なら小さめ。` },
+      { arg: `minArea (最小領域面積)`, desc: `これ未満の小さな矩形(ノイズ)を除外する。上限(画像の35%)を超える大領域=背景枠も自動除外する。` },
+    ],
+    code: [
+      `cv.threshold(gray, bin, 0,255, cv.THRESH_BINARY_INV+cv.THRESH_OTSU); // ① 暗部=文字を白く`,
+      `let M = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(21,3)); // 横長カーネル`,
+      `cv.morphologyEx(bin, closed, cv.MORPH_CLOSE, M); // ② 文字を行に連結`,
+      `cv.findContours(closed, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);`,
+      `let r = cv.boundingRect(cnt); // ③ 横長で適度な大きさ=テキスト行`,
+      `if (r.width > r.height*1.3 && a < imgArea*0.35) cv.rectangle(dst, ...);`,
+    ],
+    useCases: [`文書のテキスト行/段落の検出(OCR前段)`, `看板・標識・パッケージの文字領域抽出`, `レイアウト解析・帳票の項目領域検出`, `字幕・キャプションの位置検出`],
+  },
+
+  'recipe-contour-measure': {
+    overview: `各図形の輪郭から「円形度(circularity)」を計算し、円か多角形かを自動で判定して色分けするレシピです。円形度は 4π×面積 ÷ 周囲長² で定義され、完全な円で1.0、角張った形ほど小さくなります(同じ面積なら円が最も周囲長が短いため)。面積や周囲長といった輪郭特徴量を組み合わせると、形状の自動仕分けや不良検出ができます。`,
+    pipeline: [`グレースケール化し反転Otsu二値化で図形を白くする`, `findContoursで各図形の輪郭を取得する`, `面積(contourArea)と周囲長(arcLength)から円形度 4πA/L² を計算する`, `円形度がしきい値より高ければ円(緑)、低ければ多角形(橙)に色分けし値を表示する`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `二値化→形状計測の切替。` },
+      { arg: `minArea (最小面積)`, desc: `これ未満の小さな輪郭(ノイズ)を計測対象から除外する。` },
+    ],
+    code: [
+      `cv.threshold(gray, bin, 0,255, cv.THRESH_BINARY_INV+cv.THRESH_OTSU);`,
+      `cv.findContours(bin, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);`,
+      `let area = cv.contourArea(cnt);`,
+      `let peri = cv.arcLength(cnt, true);`,
+      `let circularity = 4*Math.PI*area / (peri*peri); // 1.0=完全な円`,
+      `let color = circularity > 0.82 ? GREEN : ORANGE; // 円 / 多角形`,
+    ],
+    useCases: [`円形/非円形の自動仕分け(部品検査)`, `形状崩れ・欠けの不良検出`, `粒子・細胞の真円度評価`, `輪郭特徴量を使った形状分類の基礎`],
+  },
+
+  'recipe-roi-mosaic': {
+    overview: `画像の一部だけをモザイク・ぼかし・黒塗りで隠すレシピです。プレビュー上でドラッグして矩形(ROI)を指定すると、その領域だけが加工されます。モザイクは「ROIを一度小さく縮小し、最近傍補間で元サイズに拡大し直す」ことで作ります(画素が大きなブロックになる)。顔やナンバープレートの目隠しなどプライバシー保護に使われます。`,
+    pipeline: [`プレビュー上でドラッグして隠す矩形領域(ROI)を指定する`, `ROIを縮小→最近傍補間で拡大し直してモザイク化する(またはぼかし/黒塗り)`, `ROIは元画像と同じメモリを参照するので、書き込むと元画像に反映される`],
+    params: [
+      { arg: `rect (対象領域)`, desc: `プレビューをドラッグして指定する隠す矩形。元画像と同じ座標系のピクセル[x,y,幅,高さ]。` },
+      { arg: `block (モザイクの粗さ)`, desc: `モザイクのブロックの大きさ。大きいほど粗く(=情報が消えて)強い目隠しになる。` },
+      { arg: `mode (処理)`, desc: `モザイク(画素をブロック化)/ぼかし(ガウシアン)/黒塗り(塗りつぶし)を切り替える。` },
+    ],
+    code: [
+      `let out = rgb.clone();`,
+      `let roi = out.roi(new cv.Rect(x, y, w, h)); // ① 領域ビュー(元と同じメモリ)`,
+      `// ② モザイク: 縮小 → 最近傍で拡大`,
+      `cv.resize(roi, small, new cv.Size(Math.round(w/16), Math.round(h/16)), 0, 0, cv.INTER_LINEAR);`,
+      `cv.resize(small, roi, new cv.Size(w, h), 0, 0, cv.INTER_NEAREST); // roiへ書く=outに反映`,
+    ],
+    useCases: [`顔・人物のプライバシー保護(目隠し)`, `車のナンバープレートのマスキング`, `画面共有/SNS投稿前の機密情報の隠蔽`, `配信映像の部分モザイク`],
+  },
+
+  'recipe-auto-canny': {
+    overview: `画像ごとにCannyの上下しきい値を手で調整する手間をなくす、自動しきい値Cannyのレシピです。画素値の中央値(median)を求め、下限=(1−σ)×中央値、上限=(1+σ)×中央値 と計算します。明るい画像なら中央値が高くしきい値も高く、暗い画像なら低く、と画像の明るさに自動適応します。PyImageSearchで広まった実用テクニックで、σ=0.33が定番です。`,
+    pipeline: [`グレースケール化し軽くぼかしてノイズを抑える`, `ヒストグラムの累積から画素値の中央値を求める`, `下限=(1−σ)×中央値, 上限=(1+σ)×中央値 を計算する`, `その自動しきい値でCannyエッジ検出する`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `ぼかし→自動Cannyの切替。` },
+      { arg: `sigma (σ)`, desc: `中央値からどれだけ広い範囲をしきい値にするか。小さいとエッジが厳選され、大きいと多く拾う。0.33が定番、ノイズが多いなら大きめ。` },
+    ],
+    code: [
+      `cv.GaussianBlur(gray, blur, new cv.Size(3,3), 0);`,
+      `// ① 中央値をヒストグラムの累積から求める`,
+      `let median = /* 累積画素数が半分を超える画素値 */;`,
+      `let lower = Math.max(0, (1 - 0.33) * median); // ② 自動しきい値`,
+      `let upper = Math.min(255, (1 + 0.33) * median);`,
+      `cv.Canny(blur, edges, lower, upper); // ③`,
+    ],
+    useCases: [`画像ごとの手動調整が不要なエッジ検出`, `明るさがバラバラな多数画像の一括処理`, `撮影条件が変わる現場でのロバストなエッジ抽出`, `自動パイプラインの前処理`],
+  },
+
+  'recipe-contrast-stretch': {
+    overview: `画素値が狭い範囲にしか使われていない眠い画像を、使用範囲を0〜255いっぱいに引き伸ばしてコントラストを最大化するレシピです。CLAHEやヒストグラム均一化と違い、線形(一次関数)で大域的に伸ばすだけなので階調や色が自然に保たれます。上下数%の外れ値をパーセンタイルでクリップしてから伸ばすと、白飛び/黒つぶれした少数画素に引きずられず頑健になります。`,
+    pipeline: [`グレースケール化する`, `ヒストグラムから下位/上位パーセンタイルの画素値[low, high]を求める`, `[low, high]を[0, 255]に線形変換する(convertToのα,β)`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `元画像→伸張後の切替。狭い階調が全域に広がる様子が分かる。` },
+      { arg: `clip (外れ値クリップ%)`, desc: `上下それぞれ何%の画素を外れ値として無視してから伸ばすか。2%程度にすると、わずかな白飛び/黒つぶれ画素の影響を受けず安定する。0で純粋な最小〜最大。` },
+    ],
+    code: [
+      `// ① 下位/上位パーセンタイル low, high を求める`,
+      `let alpha = 255 / (high - low);   // 傾き`,
+      `let beta = -low * alpha;          // 切片`,
+      `// ② 線形変換 dst = src*alpha + beta で [low,high]→[0,255]`,
+      `gray.convertTo(dst, -1, alpha, beta);`,
+    ],
+    useCases: [`低コントラスト写真の補正`, `霧・かすみ画像のコントラスト復元`, `計測・解析前の輝度正規化`, `スキャン画像の白黒メリハリ付け`],
+  },
+
+  'recipe-color-pop': {
+    overview: `指定した色だけをカラーで残し、他をモノクロにする「カラーポップ(スプラッシュ)」の演出レシピです。HSVのinRangeで残したい色のマスクを作り、画像全体をグレースケール化したものを背景にして、マスク部分だけ元のカラーを戻します。特定の被写体や商品を視覚的に際立たせる写真演出としてよく使われます。`,
+    pipeline: [`RGB→HSV変換する`, `inRangeで「残す色」のマスクを作る`, `画像をグレースケール化し3チャンネルに戻して背景にする`, `マスク部分だけ元のカラーを上書きで戻す`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `残す色のマスク→カラーポップ結果の切替。` },
+      { arg: `hLow / hHigh (残す色相)`, desc: `カラーのまま残す色の色相範囲(0〜179)。デフォルトは赤(0〜12)。緑なら35〜85など。` },
+    ],
+    code: [
+      `cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);`,
+      `cv.inRange(hsv, low, high, mask); // ① 残す色のマスク`,
+      `cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);`,
+      `cv.cvtColor(gray, out, cv.COLOR_GRAY2RGB); // ② 背景をモノクロに`,
+      `rgb.copyTo(out, mask); // ③ マスク部分だけ元の色を戻す`,
+    ],
+    useCases: [`特定色の被写体を引き立てる写真演出`, `商品写真で主役の色だけ強調`, `注目領域のハイライト表示`, `広告/SNS向けのアート加工`],
+  },
+
+  'recipe-gradient-orientation': {
+    overview: `画像の各点で「エッジがどの向きを向いているか」を色で可視化するレシピです。Sobelでx方向・y方向の輝度勾配を求め、cartToPolarで各画素の勾配の大きさ(エッジの強さ)と角度(エッジの向き)に変換します。角度を色相、強さを明度としてHSV画像にすると、輪郭が向きごとに色分けされて見えます。HOG(Histogram of Oriented Gradients)など方向ベースの特徴量の基礎となる考え方です。`,
+    pipeline: [`グレースケール化する`, `Sobelでx方向(gx)とy方向(gy)の勾配を計算する`, `cartToPolarでgx,gyから大きさ(mag)と角度(ang)を求める`, `角度→色相, 強さ→明度 のHSV画像にしてRGBに変換する`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `勾配の大きさ(エッジ強度)→方向マップ(色=向き)の切替。` },
+    ],
+    code: [
+      `cv.Sobel(gray, gx, cv.CV_32F, 1, 0, 3); // x方向勾配`,
+      `cv.Sobel(gray, gy, cv.CV_32F, 0, 1, 3); // y方向勾配`,
+      `cv.cartToPolar(gx, gy, mag, ang, true); // 大きさと角度(度)`,
+      `cv.normalize(mag, magN, 0, 255, cv.NORM_MINMAX);`,
+      `// H = ang/2 (0-180=向き), S = 255, V = magN (強さ) → HSV2RGB`,
+    ],
+    useCases: [`エッジの方向分布の可視化`, `HOG特徴量・方向ヒストグラムの理解`, `繊維・木目などテクスチャの方向解析`, `指紋の隆線方向マップ`],
+  },
+
+  'recipe-binary-cleanup': {
+    overview: `二値化した直後のノイズだらけのマスクを、モルフォロジーで仕上げる後処理の定番レシピです。まず開処理(収縮→膨張)で背景に散った白い孤立点を消し、次に閉処理(膨張→収縮)で前景内の黒い小穴を埋めます。「先に点を消してから穴を埋める」順序が重要で、色抽出やセグメンテーションなどあらゆるマスク生成の最後に挟むときれいな結果になります。`,
+    pipeline: [`グレースケール化し二値化する(ノイズが残った状態)`, `開処理(MORPH_OPEN)で孤立した白い点ノイズを除去する`, `閉処理(MORPH_CLOSE)で前景内の黒い小穴を埋める`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `生の二値化→開処理→閉処理の3段階を切替。各処理が何を消す/埋めるかが分かる。` },
+      { arg: `k (カーネルサイズ)`, desc: `構造要素のサイズ(奇数)。大きいほど強くノイズ除去/穴埋めするが、細い構造や小さな対象も消える。ノイズ粒の大きさに合わせて3〜5。` },
+    ],
+    code: [
+      `cv.threshold(gray, bin, 0,255, cv.THRESH_BINARY_INV+cv.THRESH_OTSU); // 二値化`,
+      `let M = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3,3));`,
+      `cv.morphologyEx(bin, opened, cv.MORPH_OPEN, M);  // ① 白い点を除去`,
+      `cv.morphologyEx(opened, dst, cv.MORPH_CLOSE, M); // ② 黒い穴を埋める`,
+    ],
+    useCases: [`色抽出/inRangeマスクの仕上げ`, `背景差分・前景マスクのノイズ除去`, `セグメンテーション結果の境界整形`, `二値化文書の点ノイズ除去`],
+  },
+
+  'recipe-size-sort': {
+    overview: `物体を大きさで2つのクラスに自動仕分けするレシピです。二値化と開処理で物体を分離した後、各輪郭の面積を求め、設定した境界面積を基準に「大きい(橙で塗る)」「小さい(緑で塗る)」に色分けして、それぞれの個数を数えます。良品/規格外の選別や粒度分類など、サイズが品質指標になる検査に使えます。`,
+    pipeline: [`グレースケール化しOtsu二値化＋開処理で物体を分離する`, `findContoursで各物体の輪郭を取得する`, `contourAreaで面積を求め、境界面積と比較して大小に分類する`, `大=橙、小=緑に塗り分けて個数を集計する`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `二値化→大きさ仕分けの切替。` },
+      { arg: `thresh (大小の境界面積)`, desc: `この画素面積を境に大/小を分ける。対象物の典型サイズの中間に設定すると2クラスにきれいに分かれる。` },
+    ],
+    code: [
+      `cv.threshold(gray, bin, 0,255, cv.THRESH_BINARY+cv.THRESH_OTSU);`,
+      `cv.morphologyEx(bin, bin, cv.MORPH_OPEN, M); // 分離`,
+      `cv.findContours(bin, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);`,
+      `let area = cv.contourArea(cnt);`,
+      `let big = area >= 12000; // 境界面積で分類`,
+      `cv.drawContours(out, contours, i, big ? ORANGE : GREEN, -1); // 塗り分け`,
+    ],
+    useCases: [`部品・果実の大小選別`, `規格サイズ外の不良検出`, `粒子の粒度(大小)分類`, `硬貨の額面(サイズ)別の仕分け`],
+  },
+
+  'recipe-count-by-color': {
+    overview: `色ごとに物体の数を数える分類カウントレシピです。あらかじめ定義した複数の色帯(赤・黄・緑・青・紫)それぞれについて、HSVのinRangeでマスクを作り、輪郭抽出して数えます。1回の処理で「赤が何個、緑が何個…」と色別の内訳が得られるので、色が分類キーになる在庫管理や仕分け検査に向いています。`,
+    pipeline: [`RGB→HSV変換する`, `色帯(赤/黄/緑/青/紫)ごとにinRangeでマスクを作る`, `各マスクをfindContoursし、面積でノイズを除いて数える`, `色別の個数を集計し、各物体をその色で描画する`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `全色を塗ったマスク→元画像に色別輪郭を重ねた完成、の切替。` },
+      { arg: `sMin (彩度しきい値)`, desc: `各色帯で要求する鮮やかさの下限。上げると淡い色や背景を除外でき誤カウントが減る。` },
+    ],
+    code: [
+      `cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);`,
+      `for (let band of [{name:'赤',lo:0,hi:12}, {name:'緑',lo:41,hi:85}, ...]) {`,
+      `  cv.inRange(hsv, [band.lo,sMin,40], [band.hi,255,255], mask);`,
+      `  cv.findContours(mask, cont, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);`,
+      `  count[band.name] = /* 面積>500 の輪郭数 */;`,
+      `}`,
+    ],
+    useCases: [`色別の在庫・部品カウント`, `分類シールやキャップの色別集計`, `信号色(赤/青/黄)ごとの検出数`, `カラーボールの色別個数計測`],
+  },
+
+  'recipe-pseudocolor': {
+    overview: `グレースケールの明暗を「色」に置き換えて、人間が気づきにくい微妙な輝度差を見やすくするレシピです。輝度0〜255をJET(青→緑→赤)やHOT(黒→赤→白)などのカラーマップで対応づけます。サーモグラフィや深度マップ、科学計測データの可視化で使われ、隣り合う値のわずかな差が色の変化として強調されます。`,
+    pipeline: [`グレースケール化して輝度1チャンネルにする`, `各輝度値をカラーマップ(JET/HOT)のルックアップテーブルでRGBに変換する`, `微妙な明暗差が色の違いとして見えるようになる`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `グレー→疑似カラーの切替。同じ輝度がどんな色になるか分かる。` },
+      { arg: `map (カラーマップ)`, desc: `JET=青(低)→赤(高)の虹色、HOT=黒→赤→白の白熱色。データの性質や見やすさで選ぶ。` },
+    ],
+    code: [
+      `cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);`,
+      `// 輝度 t = gray/255 を JET 近似式で RGB に変換`,
+      `let r = clamp(1.5 - Math.abs(4*t - 3));`,
+      `let g = clamp(1.5 - Math.abs(4*t - 2));`,
+      `let b = clamp(1.5 - Math.abs(4*t - 1));`,
+      `// ※ cv.applyColorMap が使える環境なら applyColorMap(gray, dst, cv.COLORMAP_JET)`,
+    ],
+    useCases: [`熱画像・深度マップのヒートマップ表示`, `医用画像の微小な濃度差の強調`, `標高・密度など科学データの可視化`, `距離変換やヒートマップ結果の見える化`],
+  },
+
+  'recipe-glow-bloom': {
+    overview: `明るい部分が周囲ににじみ出す「グロー(ブルーム)」効果を作る写真加工レシピです。まずしきい値処理で明るい部分(光源やハイライト)だけを抽出し、それを大きめにぼかして「にじみ」を作ります。最後に元画像へ加算合成すると、光が柔らかく溢れるような表現になります。明部抽出→ぼかし→合成という典型的な3段パイプラインです。`,
+    pipeline: [`しきい値処理で明るい部分のマスクを作り、その部分だけ色を抽出する`, `抽出した明部を大きめのガウシアンでぼかして「にじみ」を作る`, `ぼかした明部を元画像に加重加算で足し戻す`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `抽出した明部→グロー合成の切替。どこが光源として扱われるか分かる。` },
+      { arg: `thresh (明部しきい値)`, desc: `この明るさ以上を「光源」として扱う。下げると広い範囲が光り、上げると最も明るい部分だけがにじむ。` },
+      { arg: `strength (グローの強さ)`, desc: `にじみを元画像に足す量。大きいほど強く発光するが、行き過ぎると白飛びする。` },
+    ],
+    code: [
+      `cv.threshold(gray, mask, 180, 255, cv.THRESH_BINARY); // ① 明部マスク`,
+      `cv.bitwise_and(rgb, rgb, bright, mask);  // 明部だけ抽出`,
+      `cv.GaussianBlur(bright, glow, new cv.Size(31,31), 0); // ② にじみ`,
+      `cv.addWeighted(rgb, 1, glow, 0.8, 0, dst); // ③ 加算合成`,
+    ],
+    useCases: [`光源・ネオンのにじみ表現`, `夜景・イルミネーションの演出`, `ドリーミー/ソフトフォーカス風の加工`, `SF・ゲーム風のブルームエフェクト`],
+  },
+
+  'recipe-vignette': {
+    overview: `画像の四隅を暗く落として中央を引き立てる「ビネット(周辺減光)」効果のレシピです。各画素について画像中心からの距離を計算し、外側ほど小さくなる減光係数を作って画素値に掛けます。レンズの特性を模した古典的な写真演出で、見る人の視線を自然に中央の被写体へ誘導します。`,
+    pipeline: [`各画素の中心からの正規化距離(0=中心, 1=隅)を求める`, `指定半径より外側で徐々に小さくなる減光係数fを計算する`, `各画素のRGBにfを掛けて四隅を暗くする`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `元画像→ビネット適用の切替。` },
+      { arg: `strength (減光の強さ)`, desc: `四隅をどれだけ暗くするか。1.0で隅が真っ暗近くまで落ちる。` },
+      { arg: `radius (効果開始の半径)`, desc: `中心からこの正規化距離までは減光せず、外側で徐々に暗くなる。小さいと中央の明るい範囲が狭くなる。` },
+    ],
+    code: [
+      `let maxD = dist(0,0, center);`,
+      `for (each pixel x,y) {`,
+      `  let d = dist(x,y, center) / maxD;          // 正規化距離`,
+      `  let f = 1 - strength * Math.max(0, (d - radius)/(1 - radius));`,
+      `  pixel.rgb *= Math.max(0, f);               // 減光`,
+      `}`,
+    ],
+    useCases: [`ポートレートで被写体に視線を集める`, `レトロ/フィルムカメラ風の演出`, `商品写真の中央強調`, `ゲーム/映像の没入感演出`],
+  },
+
+  'recipe-motion-blur': {
+    overview: `被写体やカメラが動いたときのような「流れるブレ」を、指定方向に作るレシピです。通常のぼかしは点対称ですが、モーションブラーは特定の方向にだけぼかします。これは「その角度の線状のカーネル」を作ってfilter2Dで畳み込むことで実現します。カスタムカーネル設計の良い実例で、角度を変えるとブレの向きが変わります。`,
+    pipeline: [`指定した長さ・角度の線をL×Lのカーネル行列に1で描く`, `カーネルの合計が1になるよう正規化する(明るさを保つ)`, `そのカーネルでfilter2D畳み込みを行い、その方向に流れたブレを作る`],
+    params: [
+      { arg: `stage (表示ステップ)`, desc: `元画像→方向ブラーの切替。` },
+      { arg: `length (ブレの長さ)`, desc: `線状カーネルの長さ(奇数)。長いほど大きく流れるが処理が重く、細部が失われる。` },
+      { arg: `angle (ブレの角度)`, desc: `ブレる方向(度)。0°で水平、90°で垂直。動きの向きに合わせる。` },
+    ],
+    code: [
+      `// 長さL・角度angの線をL×L行列に描く`,
+      `for (let t=-(L-1)/2; t<=(L-1)/2; t++) {`,
+      `  let xx = Math.round(c + Math.cos(ang)*t), yy = Math.round(c + Math.sin(ang)*t);`,
+      `  kdata[yy*L + xx] = 1;`,
+      `}`,
+      `// 合計で割って正規化 → filter2D`,
+      `let kernel = cv.matFromArray(L, L, cv.CV_32F, kdata);`,
+      `cv.filter2D(rgb, dst, -1, kernel);`,
+    ],
+    useCases: [`スピード感のある写真演出`, `手ブレ・被写体ブレの再現`, `動きの方向の表現`, `カスタム畳み込みカーネルの学習教材`],
+  },
 };

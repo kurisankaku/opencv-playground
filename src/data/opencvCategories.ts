@@ -336,6 +336,20 @@ export const openCvCategories: OpenCvCategory[] = [
     displayOrder: 20,
     webAppPresentation: 'デモ機能そのものというより全デモの土台。アップロード/サンプル選択/比較UIを共通部品化。',
   },
+  {
+    id: 'recipes',
+    slug: 'recipes',
+    nameJa: '組み合わせレシピ',
+    nameEn: 'Combination Recipes',
+    description:
+      '複数の手法を順番に組み合わせて1つの実用課題を解く定番パイプライン集。各レシピは「表示ステップ」で中間結果を切り替えて確認でき、手法をどう繋ぐと最大の効果が出るかを体験できる。',
+    opencvModules: ['imgproc', 'core'],
+    phase: 'phase-2',
+    priority: 'A',
+    isMvpCandidate: true,
+    displayOrder: 21,
+    webAppPresentation: 'パイプラインの各ステップを切替表示し、組み合わせの威力と各手法の役割を可視化する。',
+  },
 ];
 
 /** id 引きユーティリティ。 */

@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react';
 import { useOpenCv } from '../context/OpenCvContext';
 import type { DemoImpl, InfoItem } from '../lib/processors';
+import type { ChartData } from '../lib/chartTypes';
 import { renderSample } from '../lib/sampleImages';
 import { CompareView } from './CompareView';
+import { HistogramChart } from './HistogramChart';
 import { ImageSource } from './ImageSource';
 import { ParamPanel } from './ParamPanel';
 import { InfoTable } from './InfoTable';
@@ -22,8 +24,10 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
   const [source, setSource] = useState<HTMLCanvasElement>(() => renderSample(impl.defaultSample));
   const [params, setParams] = useState<Record<string, any>>(() => defaults(impl));
   const [info, setInfo] = useState<InfoItem[]>([]);
+  const [chart, setChart] = useState<ChartData | null>(null);
   const [busy, setBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  const isChart = impl.output === 'chart';
 
   const beforeRef = useRef<HTMLCanvasElement>(null);
   const afterRef = useRef<HTMLCanvasElement>(null);
@@ -51,15 +55,17 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
       process(demoId, { data: img.data, width: img.width, height: img.height }, params)
         .then((res) => {
           if (myToken !== token.current) return; // a newer request superseded this one
+          setChart(res.chart ?? null);
           const after = afterRef.current;
-          if (!after) return;
-          after.width = res.image.width;
-          after.height = res.image.height;
-          const actx = after.getContext('2d');
-          if (actx) {
-            const out = actx.createImageData(res.image.width, res.image.height);
-            out.data.set(res.image.data);
-            actx.putImageData(out, 0, 0);
+          if (res.image && after) {
+            after.width = res.image.width;
+            after.height = res.image.height;
+            const actx = after.getContext('2d');
+            if (actx) {
+              const out = actx.createImageData(res.image.width, res.image.height);
+              out.data.set(res.image.data);
+              actx.putImageData(out, 0, 0);
+            }
           }
           setInfo(res.info);
           setRunError(null);
@@ -107,13 +113,26 @@ export function DemoRunner({ demoId, impl }: { demoId: string; impl: DemoImpl })
           </div>
         )}
 
-        <CompareView
-          beforeRef={beforeRef}
-          afterRef={afterRef}
-          aspect={aspect}
-          busy={busy}
-          className="max-h-[44vh] lg:max-h-none"
-        />
+        {isChart ? (
+          <div className="space-y-3" data-testid="chart-preview">
+            <div className="overflow-hidden rounded-xl border border-line bg-[#06070b]">
+              <canvas
+                ref={beforeRef}
+                className="mx-auto block max-h-[26vh] w-auto max-w-full object-contain lg:max-h-[34vh]"
+                style={{ aspectRatio: String(aspect || 4 / 3) }}
+              />
+            </div>
+            <HistogramChart data={chart} busy={busy} />
+          </div>
+        ) : (
+          <CompareView
+            beforeRef={beforeRef}
+            afterRef={afterRef}
+            aspect={aspect}
+            busy={busy}
+            className="max-h-[44vh] lg:max-h-none"
+          />
+        )}
       </div>
 
       <div className="space-y-4">

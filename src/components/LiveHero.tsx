@@ -36,7 +36,7 @@ export function LiveHero() {
         .then((res) => {
           if (myToken !== token.current) return;
           const after = afterRef.current;
-          if (!after) return;
+          if (!after || !res.image) return;
           after.width = res.image.width;
           after.height = res.image.height;
           const actx = after.getContext('2d');

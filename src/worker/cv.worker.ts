@@ -174,8 +174,15 @@ ctx.onmessage = async (e: MessageEvent) => {
       src.data.set(image.data);
 
       result = impl.run(cv, src, params);
-      const out = toRgbaImage(cv, result.output);
-      ctx.postMessage({ type: 'result', reqId, image: out, info: result.info ?? [] }, [out.data.buffer]);
+      const msg: any = { type: 'result', reqId, info: result.info ?? [] };
+      const transfer: Transferable[] = [];
+      if (result.output) {
+        const out = toRgbaImage(cv, result.output);
+        msg.image = out;
+        transfer.push(out.data.buffer);
+      }
+      if (result.chart) msg.chart = result.chart;
+      ctx.postMessage(msg, transfer);
     } catch (err: any) {
       ctx.postMessage({ type: 'result', reqId, error: err?.message ?? String(err) });
     } finally {

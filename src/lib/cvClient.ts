@@ -1,4 +1,5 @@
 import CvWorker from '../worker/cv.worker?worker';
+import type { ChartData } from './chartTypes';
 
 /**
  * Main-thread client for the OpenCV.js worker. A single shared worker handles
@@ -14,7 +15,8 @@ export interface CvImage {
 }
 
 export interface ProcessResult {
-  image: CvImage;
+  image?: CvImage; // absent for chart-only demos
+  chart?: ChartData;
   info: { label: string; value: string }[];
 }
 
@@ -51,7 +53,7 @@ function ensureWorker(): Worker {
       if (!p) return;
       pending.delete(m.reqId);
       if (m.error) p.reject(new Error(m.error));
-      else p.resolve({ image: m.image, info: m.info ?? [] });
+      else p.resolve({ image: m.image, chart: m.chart, info: m.info ?? [] });
     }
   });
   worker.addEventListener('error', (ev) =>

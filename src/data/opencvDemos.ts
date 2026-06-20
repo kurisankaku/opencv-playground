@@ -723,8 +723,8 @@ export const openCvDemos: OpenCvDemo[] = [
     priority: 'B',
     phase: 'phase-3',
     isMvp: false,
-    opencvJsSupport: 'needs-investigation',
-    browserSupportNotes: 'photo モジュールが公式 opencv.js デフォルトビルドに含まれるか要確認。重い処理。',
+    opencvJsSupport: 'not-supported',
+    browserSupportNotes: '【2026-06 実機検証】cv.fastNlMeansDenoising が techstark 4.10 ビルドに未バインド（photo は inpaint のみ収録）。',
     implementationNotes: '提供される場合も計算コストが高いため小さい画像に限定。',
     limitations: 'photo モジュール提供有無が不確実。非常に遅い可能性。',
     codeExample: {
@@ -2389,8 +2389,8 @@ export const openCvDemos: OpenCvDemo[] = [
     priority: 'C',
     phase: 'phase-7',
     isMvp: false,
-    opencvJsSupport: 'likely-supported',
-    browserSupportNotes: 'findChessboardCorners の opencv.js 公開を確認。',
+    opencvJsSupport: 'not-supported',
+    browserSupportNotes: '【2026-06 実機検証】cv.findChessboardCorners / drawChessboardCorners / cornerSubPix が techstark 4.10 ビルドに未バインド。',
     implementationNotes: 'コーナー検出→drawChessboardCornersで可視化。キャリブレーションの入口。',
     limitations: 'ボードが鮮明に写っている必要がある。',
     codeExample: {
@@ -2416,8 +2416,8 @@ export const openCvDemos: OpenCvDemo[] = [
     priority: 'C',
     phase: 'phase-7',
     isMvp: false,
-    opencvJsSupport: 'needs-investigation',
-    browserSupportNotes: 'calibrateCamera の opencv.js 公開と多数画像処理の実用性を要確認。',
+    opencvJsSupport: 'not-supported',
+    browserSupportNotes: '【2026-06 実機検証】cv.calibrateCamera / cornerSubPix が techstark 4.10 ビルドに未バインド。前段のチェスボード検出も無い。',
     implementationNotes: '複数枚のコーナー検出結果を集約→calibrateCamera→undistort。手順が多く専門的。',
     limitations: '複数枚必要で UX が重い。opencv.js 提供が不確実。',
     codeExample: {
@@ -2573,8 +2573,8 @@ export const openCvDemos: OpenCvDemo[] = [
     priority: 'C',
     phase: 'phase-7',
     isMvp: false,
-    opencvJsSupport: 'needs-investigation',
-    browserSupportNotes: 'ml モジュールの opencv.js 含有を要確認。学習データの同梱も必要。',
+    opencvJsSupport: 'not-supported',
+    browserSupportNotes: '【2026-06 実機検証】cv.KNearest（ml モジュール）が techstark 4.10 ビルドに未バインド。',
     implementationNotes: 'Canvas描画→特徴量→kNN.findNearest。提供されればインタラクティブで楽しい。',
     limitations: 'ml 提供が不確実。学習データ準備が必要。',
     codeExample: {

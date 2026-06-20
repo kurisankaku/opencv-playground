@@ -180,18 +180,23 @@ Emscripten のヒープは**手動管理**。JS の GC では `cv.Mat` 等は解
 
 ### 9.1 バインディング存在/動作確認
 
-- [ ] `CLAHE` (`cv.CLAHE` クラス or `cv.createCLAHE`) が公開されているか
-- [ ] `QRCodeDetector` の検出 + デコードが動くか
-- [ ] `photo` モジュール (`inpaint`, `fastNlMeansDenoising`, `stylization`, `pencilSketch`, `edgePreservingFilter`, `seamlessClone`) の各 API が存在するか
-- [ ] `Stitcher` が存在するか (無ければ features2d + `findHomography` で自前実装する方針か決定)
-- [ ] `SIFT` (`cv.SIFT`) がコンパイルされているか (無ければ `ORB` を既定に)
-- [ ] `ml` 系 (`cv.SVM`, `cv.KNearest` 等) が公開されているか
-- [ ] `calibrateCamera` / `findChessboardCorners` / `solvePnP` の存在とブラウザでの実用性 (精度/速度)
-- [ ] `calcOpticalFlowFarneback` のバインディング有無
-- [ ] `meanShift` / `CamShift` のバインディング有無
-- [ ] 背景差分 `BackgroundSubtractorMOG2` / `KNN` の生成・apply 動作
-- [ ] `calcOpticalFlowPyrLK` の引数形と動作
-- [ ] `findHomography` の動作 (RANSAC 含む)
+> **【2026-06 実機検証済み】** ship している `@techstark/opencv-js@4.10.0-release.1` に対し `typeof cv.<symbol>` と最小サンプルで確認した結果。✅=利用可（実装に採用） / ❌=未バインド（標準ビルド未収録）。
+
+- [x] ✅ `CLAHE`: `new cv.CLAHE(clip, size)` 利用可（`createCLAHE` は無いがクラス直接生成でOK）→ **clahe 実装済み**
+- [x] △ `QRCodeDetector`: バインディング**有り**。ただし手続き生成サンプルに有効QRが無く、QR画像アップロード前提のため**据え置き**
+- [x] `photo`: ✅ `inpaint`（+`INPAINT_TELEA/NS`）**有り → inpainting 実装済み**。❌ `fastNlMeansDenoising` / `stylization` / `pencilSketch` / `edgePreservingFilter` は**未バインド**（stylization-filters は imgproc で自前近似）
+- [x] ❌ `Stitcher`: 未バインド → **panorama-stitching は ORB+`findHomography`+`warpPerspective` で自前実装**
+- [x] ❌ `SIFT` (`cv.SIFT`): 未バインド → **sift-features は `cv.AKAZE`（✅有り）で代替**（ORB/AKAZE が既定）
+- [x] ❌ `ml` 系 (`cv.KNearest`): 未バインド → **knn-digit-recognition 不可**
+- [x] ❌ `calibrateCamera` / `findChessboardCorners` / `cornerSubPix`: いずれも未バインド → **chessboard-corners / camera-calibration 不可**
+- [x] ✅ `calcOpticalFlowFarneback`: 有り → **dense-optical-flow 実装済み**（240pxに縮小して使用）
+- [x] ✅ `meanShift` / `CamShift`: 有り → **meanshift-camshift 実装済み**（戻り値は `[rotatedRect/retval, window]` 配列）
+- [x] ✅ 背景差分: `BackgroundSubtractorMOG2` 有り（**KNN は ❌未バインド**）→ **background-subtraction 実装済み**
+- [x] ✅ `calcOpticalFlowPyrLK`: 有り → **optical-flow-lk 実装済み**（`goodFeaturesToTrack` で点初期化）
+- [x] ✅ `findHomography`（RANSAC）/ `perspectiveTransform`: 有り → **homography-estimation / panorama-stitching に採用**
+- [x] objdetect: ✅ `CascadeClassifier` / `FS_createDataFile` / `RectVector` **有り**。ただし顔/目サンプルが無く + カスケードXMLの仮想FS非同期ロード基盤が要るため **face/eye-detection-haar は据え置き**
+- [x] dnn: ❌ `cv.dnn` 名前空間は無いが ✅ `cv.readNetFromONNX` 等トップレベル関数は**有り**。ただし数MB級モデルの同梱/配信・前後処理が要るため **dnn-* は据え置き**
+- [x] その他: ✅ `matchShapes` / `compareHist` / `matchTemplate` / `BFMatcher` / `DMatchVector` / `kmeans`（labels は `intAt` で読む）/ `cartToPolar` / `AKAZE` 有り。❌ `Mat.reshape` は**未バインド**（kmeans は Nx3 Mat を手動構築）
 
 ### 9.2 ランタイム/ビルド/性能
 
@@ -229,4 +234,4 @@ OpenCV.js で不足/不確実な領域は、以下の代替・回避策を検討
 
 ---
 
-_最終更新は実装着手時の検証結果を反映すること。本メモの「要調査」項目が 9 章のチェックで埋まり次第、確度を更新する。_
+_2026-06 更新: 9.1 のバインディング存在確認を ship 中の `@techstark/opencv-js@4.10.0-release.1` に対して実機検証済み（✅/❌を反映）。未対応デモの個別理由は `src/data/deferredNotes.ts` に集約し、各デモ詳細ページに表示している。_

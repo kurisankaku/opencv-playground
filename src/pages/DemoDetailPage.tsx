@@ -1,6 +1,7 @@
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, Clock, ExternalLink } from 'lucide-react';
+import { ArrowLeft, Clock, ExternalLink, Wrench } from 'lucide-react';
 import { openCvDemos, getDemosByCategory } from '../data/opencvDemos';
+import { deferredNotes, deferReasonLabel } from '../data/deferredNotes';
 import { getCategoryById } from '../data/opencvCategories';
 import { getImpl } from '../lib/processors';
 import { DemoRunner } from '../components/DemoRunner';
@@ -19,6 +20,7 @@ export function DemoDetailPage() {
   const category = getCategoryById(demo.categoryId);
   const accent = categoryAccent(demo.categoryId);
   const impl = getImpl(demo.id);
+  const deferred = deferredNotes[demo.id];
   const related = getDemosByCategory(demo.categoryId)
     .filter((d) => d.id !== demo.id)
     .slice(0, 4);
@@ -51,6 +53,18 @@ export function DemoDetailPage() {
       <div className="mt-8">
         {impl ? (
           <DemoRunner key={demo.id} demoId={demo.id} impl={impl} />
+        ) : deferred ? (
+          <div className="panel flex flex-col items-center gap-3 p-10 text-center">
+            <Wrench className="h-7 w-7 text-[#f5a524]" />
+            <p className="font-display text-lg font-semibold">このブラウザ環境では未対応</p>
+            <span className="chip border-[#f5a524]/30 text-[#f8d58a]">
+              理由: {deferReasonLabel[deferred.reason]}
+            </span>
+            <p className="max-w-xl text-sm leading-relaxed text-fg-dim">{deferred.detail}</p>
+            <p className="max-w-xl text-xs text-fg-faint">
+              ship する opencv.js (techstark 4.10) に対して実機検証した結果です。下記の仕様・コード例はネイティブ OpenCV を前提に参照できます。
+            </p>
+          </div>
         ) : (
           <div className="panel flex flex-col items-center gap-2 p-12 text-center">
             <Clock className="h-7 w-7 text-[#f5a524]" />

@@ -2,6 +2,7 @@ import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, Clock, ExternalLink, Wrench } from 'lucide-react';
 import { openCvDemos, getDemosByCategory } from '../data/opencvDemos';
 import { deferredNotes, deferReasonLabel } from '../data/deferredNotes';
+import { demoGuides } from '../data/demoGuides';
 import { getCategoryById } from '../data/opencvCategories';
 import { getImpl } from '../lib/processors';
 import { DemoRunner } from '../components/DemoRunner';
@@ -21,6 +22,7 @@ export function DemoDetailPage() {
   const accent = categoryAccent(demo.categoryId);
   const impl = getImpl(demo.id);
   const deferred = deferredNotes[demo.id];
+  const guide = demoGuides[demo.id];
   const related = getDemosByCategory(demo.categoryId)
     .filter((d) => d.id !== demo.id)
     .slice(0, 4);
@@ -81,12 +83,45 @@ export function DemoDetailPage() {
       <div className="mt-12 grid gap-8 lg:grid-cols-[1fr_300px]">
         <div className="space-y-8">
           <Section title="この処理について">
-            <p className="text-[15px] leading-relaxed text-fg-dim">{demo.longDescription ?? demo.description}</p>
+            <p className="whitespace-pre-line text-[15px] leading-relaxed text-fg-dim">
+              {guide?.overview ?? demo.longDescription ?? demo.description}
+            </p>
           </Section>
+
+          {guide && guide.pipeline.length > 0 && (
+            <Section title="処理の流れ">
+              <ol className="space-y-2.5">
+                {guide.pipeline.map((step, i) => (
+                  <li key={i} className="flex gap-3 text-[15px] text-fg-dim">
+                    <span
+                      className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-semibold text-ink"
+                      style={{ background: accent }}
+                    >
+                      {i + 1}
+                    </span>
+                    <span className="leading-relaxed">{step}</span>
+                  </li>
+                ))}
+              </ol>
+            </Section>
+          )}
+
+          {guide && guide.params.length > 0 && (
+            <Section title="パラメータの意味">
+              <div className="space-y-2.5">
+                {guide.params.map((p, i) => (
+                  <div key={i} className="rounded-xl border border-line bg-surface-2/50 p-3.5">
+                    <p className="font-mono text-[13px] text-cyan">{p.arg}</p>
+                    <p className="mt-1 text-[14px] leading-relaxed text-fg-dim">{p.desc}</p>
+                  </div>
+                ))}
+              </div>
+            </Section>
+          )}
 
           <Section title="ユースケース">
             <ul className="space-y-2">
-              {demo.useCases.map((u) => (
+              {(guide?.useCases ?? demo.useCases).map((u) => (
                 <li key={u} className="flex gap-2.5 text-[15px] text-fg-dim">
                   <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: accent }} />
                   {u}
@@ -96,7 +131,10 @@ export function DemoDetailPage() {
           </Section>
 
           <Section title="コード例">
-            <CodeBlock code={demo.codeExample.code} language={demo.codeExample.language} />
+            <CodeBlock
+              code={guide ? guide.code.join('\n') : demo.codeExample.code}
+              language={demo.codeExample.language}
+            />
           </Section>
 
           {demo.limitations && (
